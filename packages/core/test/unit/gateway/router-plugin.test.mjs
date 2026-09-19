@@ -23,6 +23,7 @@ import { coreGatewayAuthHeader } from "@ccr/core/gateway/internal/shared.ts";
 import { ccrRemoteControlPathPrefix } from "@ccr/core/gateway/remote-control-service.ts";
 import { gatewayRuntimeConfigControlPath, gatewayRuntimeConfigRevision } from "@ccr/core/gateway/runtime-config-control.ts";
 import { createGatewayPlugin } from "@ccr/core/gateway/core-runtime/router-plugin.ts";
+import { ccrClientVisibleModelHeader } from "@ccr/core/gateway/features/claude-default-models.ts";
 import { providerRuntimeId } from "@ccr/core/routing/model-registry.ts";
 
 test("CCR router core plugin exposes route endpoint and beforeRouting transform", async () => {
@@ -790,6 +791,72 @@ test("CCR router core plugin serves public model discovery before built-in gatew
 
   assert.deepEqual(payload.data.map((model) => model.id), ["Primary/alpha"]);
 });
+
+for (const [model, target] of [
+  ["claude-haiku-4-5", "Primary/qwen3.6-plus"],
+  ["claude-haiku-4-5-20251001", "Primary/qwen3.6-plus"],
+  ["claude-fable-5-1", "Primary/fable-target"],
+  ["claude-fable-5-1[1m]", "Primary/fable-target"],
+  ["claude-opus-5-5", "Primary/opus-target"],
+  ["claude-opus-5-5[1m]", "Primary/opus-target"]
+]) {
+  test(`CCR router core plugin maps ${model} through the profile tier`, async () => {
+    const config = createDefaultAppConfig();
+    config.Providers = [{
+      models: ["default-model", "qwen3.6-plus", "fable-target", "opus-target"],
+      name: "Primary",
+      type: "openai_chat_completions"
+    }];
+    config.APIKEY = "client-key";
+    config.APIKEYS = [{ createdAt: new Date(0).toISOString(), id: "profile:tiers", key: "client-key" }];
+    config.profile.profiles = [{
+      ...config.profile.profiles[0],
+      availableModels: ["Primary/default-model"],
+      claudeDefaultModelList: true,
+      enabled: true,
+      fableModel: "Primary/fable-target",
+      opusModel: "Primary/opus-target",
+      haikuModel: "Primary/qwen3.6-plus",
+      id: "tiers",
+      model: "Primary/default-model",
+      name: "Tiers"
+    }];
+    const plugin = await createGatewayPlugin({ plugin: { config: { appConfig: config } } });
+    const transform = plugin.requestTransforms.find((item) => item.key === ccrRouterRequestTransformKey);
+    for (const path of ["/v1/messages", "/v1/chat/completions", "/v1/responses"]) {
+      const headers = { authorization: "Bearer client-key" };
+      const requestBody = {
+        ...(path === "/v1/responses" ? { input: "hello" } : { messages: [{ role: "user", content: "hello" }] }),
+        model,
+        stream: true
+      };
+      const transformed = await transform.transform({
+        request: { headers, method: "POST", url: path },
+        requestBody,
+        route: { method: "POST", url: path }
+      });
+      assert.ok(transformed);
+      assert.equal(transformed.model, target, path);
+      assert.equal(transformed.requestBody.model, target, path);
+      assert.equal(transformed.requestBody.stream, true);
+      assert.equal(headers[ccrClientVisibleModelHeader], model);
+      assert.equal(requestBody.model, model);
+    }
+    const countTokens = plugin.httpRoutes.find((item) => item.path === "/v1/messages/count_tokens");
+    const reply = createReply();
+    const result = await countTokens.handler({
+      request: {
+        body: { model, messages: [{ role: "user", content: "hello" }] },
+        headers: { authorization: "Bearer client-key" },
+        method: "POST",
+        url: "/v1/messages/count_tokens"
+      },
+      reply
+    });
+    assert.notEqual(reply.statusCode, 403);
+    assert.equal(typeof result.input_tokens, "number");
+  });
+}
 
 test("CCR router core plugin rejects profile-disallowed routed models", async () => {
   const config = createDefaultAppConfig();
