@@ -87,7 +87,10 @@ export async function applyBailianEnhancedSearchBridgeRequestTransform(
   }
   const provider = bailianEnhancedSearchBridgeProviderForTarget(
     config,
-    requestInput.targetProvider ?? requestInput.targetProviderConfig?.name
+    // The engine passes the target adapter family (e.g. "anthropic") as
+    // targetProvider; the compiled CCR provider name only lives on
+    // targetProviderConfig.name.
+    requestInput.targetProviderConfig?.name ?? requestInput.targetProvider
   );
   if (!provider) {
     return undefined;

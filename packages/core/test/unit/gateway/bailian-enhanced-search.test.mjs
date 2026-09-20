@@ -153,7 +153,7 @@ test("CCR router core plugin bridges Bailian web_search requests end to end", as
       request: { headers: {}, id: "bailian-bridge-1", method: "POST", url: "/v1/messages" },
       requestBody: anthropicWebSearchRequestBody(),
       route: { method: "POST", url: "/v1/messages" },
-      targetProvider: "bailian::anthropic_messages",
+      targetProvider: "anthropic",
       targetProviderConfig: { name: "bailian::anthropic_messages", type: "anthropic_messages" }
     });
 
@@ -267,7 +267,7 @@ test("Bailian enhanced search bridge skips requests outside its gates", async (t
     request: { headers: {}, id: `gate-${t.name}`, method: "POST", url: "/v1/messages" },
     requestBody: anthropicWebSearchRequestBody(),
     route: { method: "POST", url: "/v1/messages" },
-    targetProvider: "bailian::anthropic_messages",
+    targetProvider: "anthropic",
     targetProviderConfig: { name: "bailian::anthropic_messages", type: "anthropic_messages" }
   };
 
@@ -276,7 +276,7 @@ test("Bailian enhanced search bridge skips requests outside its gates", async (t
 
     const openAiTarget = await transform.transform({
       ...baseInput,
-      targetProvider: "bailian::openai_chat_completions",
+      targetProvider: "openai",
       targetProviderConfig: { name: "bailian::openai_chat_completions", type: "openai_chat_completions" }
     });
     assert.equal(openAiTarget, undefined);
@@ -296,7 +296,6 @@ test("Bailian enhanced search bridge skips requests outside its gates", async (t
 
     const otherProvider = await transform.transform({
       ...baseInput,
-      targetProvider: "other-provider::anthropic_messages",
       targetProviderConfig: { name: "other-provider::anthropic_messages", type: "anthropic_messages" }
     });
     assert.equal(otherProvider, undefined);
