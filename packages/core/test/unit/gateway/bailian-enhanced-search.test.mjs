@@ -238,6 +238,49 @@ test("CCR router core plugin bridges Bailian web_search requests end to end", as
   }
 });
 
+test("Bailian enhanced search bridge detects every Anthropic web_search tool version", async () => {
+  const previousEndpoint = process.env[bailianEnhancedSearchEndpointEnv];
+  process.env[bailianEnhancedSearchEndpointEnv] = loopbackEndpoint;
+  const stub = installMcpFetchStub([
+    new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }), { headers: { "content-type": "application/json" }, status: 200 }),
+    new Response("", { status: 202 }),
+    mcpSearchResponse([{ title: "Versioned result", url: "https://example.test/versioned" }])
+  ]);
+  const config = bailianProviderConfig();
+  config.Providers = [{
+    enhancedSearch: { apiKey: "sk-ws-test", enabled: true },
+    id: "bailian",
+    models: ["qwen3.7-max"],
+    name: "Bailian",
+    type: "anthropic_messages"
+  }];
+
+  try {
+    const plugin = await createGatewayPlugin({ plugin: { config: { appConfig: config } } });
+    const transform = plugin.requestTransforms.find((item) => item.key === ccrBailianEnhancedSearchRequestTransformKey);
+    const transformed = await transform.transform({
+      request: { headers: {}, id: "bailian-versioned-1", method: "POST", url: "/v1/messages" },
+      requestBody: {
+        ...anthropicWebSearchRequestBody(),
+        tools: [{ max_uses: 3, name: "web_search", type: "web_search_20260209" }]
+      },
+      route: { method: "POST", url: "/v1/messages" },
+      targetProvider: "anthropic",
+      targetProviderConfig: { name: "bailian::anthropic_messages", type: "anthropic_messages" }
+    });
+    assert.ok(transformed, "expected the 20260209 tool version to be intercepted");
+    assert.equal(Array.isArray(transformed.requestBody.tools), false);
+    clearBailianEnhancedSearchBridgeContextsForTest();
+  } finally {
+    stub.restore();
+    if (previousEndpoint === undefined) {
+      delete process.env[bailianEnhancedSearchEndpointEnv];
+    } else {
+      process.env[bailianEnhancedSearchEndpointEnv] = previousEndpoint;
+    }
+  }
+});
+
 test("Bailian enhanced search bridge skips requests outside its gates", async (t) => {
   const previousEndpoint = process.env[bailianEnhancedSearchEndpointEnv];
   process.env[bailianEnhancedSearchEndpointEnv] = loopbackEndpoint;
