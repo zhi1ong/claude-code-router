@@ -17,6 +17,9 @@ import {
   ccrCodexBridgeRequestTransformKey,
   ccrCodexBridgeResponseHookKey,
   ccrCodexBridgeStreamHookKey,
+  ccrBailianEnhancedSearchRequestTransformKey,
+  ccrBailianEnhancedSearchResponseHookKey,
+  ccrBailianEnhancedSearchStreamHookKey,
   ccrCodexMultiAgentBridgeHeader,
   ccrLiveTokenRateConfigMessageType,
   ccrLiveTokenRateSnapshotMessageType,
@@ -59,6 +62,11 @@ import {
   prepareCodexMultiAgentBridgeRequest,
   transformCodexMultiAgentBridgeResponseValue
 } from "@ccr/core/gateway/features/codex-multi-agent-bridge";
+import {
+  applyBailianEnhancedSearchBridgeRequestTransform,
+  applyBailianEnhancedSearchBridgeResponseTransform,
+  applyBailianEnhancedSearchBridgeStreamTransform
+} from "@ccr/core/gateway/features/bailian-enhanced-search";
 import { requestLogRequestedModel } from "@ccr/core/observability/request-log-model";
 import { createStreamExperienceMeter, LiveTokenRateTracker } from "@ccr/core/observability/stream-experience";
 import {
@@ -141,6 +149,7 @@ type GatewayRequestTransformInput = {
   };
   sourceAdapterKey?: string;
   stage?: string;
+  targetProvider?: string;
   targetProviderConfig?: Pick<GatewayProviderConfig, "provider" | "type">;
 };
 
@@ -442,11 +451,20 @@ export async function createGatewayPlugin(input: GatewayPluginFactoryInput = {})
       stage: "beforeUpstream",
       transform: (requestInput: GatewayRequestTransformInput) =>
         applyCodexBridgeRequestTransform(config, requestInput)
+    }, {
+      key: ccrBailianEnhancedSearchRequestTransformKey,
+      stage: "beforeUpstream",
+      transform: (requestInput: GatewayRequestTransformInput) =>
+        applyBailianEnhancedSearchBridgeRequestTransform(config, requestInput)
     }],
     responseHooks: [{
       key: ccrCodexBridgeResponseHookKey,
       transformResponse: (responseInput: GatewayResponseHookInput) =>
         applyCodexBridgeResponseTransform(responseInput)
+    }, {
+      key: ccrBailianEnhancedSearchResponseHookKey,
+      transformResponse: (responseInput: GatewayResponseHookInput) =>
+        applyBailianEnhancedSearchBridgeResponseTransform(responseInput)
     }, {
       key: ccrOpenRouterDiscountFinalizeResponseHookKey,
       transformResponse: (responseInput: GatewayResponseHookInput) => {
@@ -458,6 +476,10 @@ export async function createGatewayPlugin(input: GatewayPluginFactoryInput = {})
       key: ccrCodexBridgeStreamHookKey,
       transformResponse: (streamInput: GatewayStreamHookInput) =>
         applyCodexBridgeStreamTransform(streamInput)
+    }, {
+      key: ccrBailianEnhancedSearchStreamHookKey,
+      transformResponse: (streamInput: GatewayStreamHookInput) =>
+        applyBailianEnhancedSearchBridgeStreamTransform(streamInput)
     }, {
       key: ccrOpenRouterDiscountFinalizeStreamHookKey,
       transformResponse: (streamInput: GatewayStreamHookInput) => {

@@ -192,7 +192,7 @@ function applyOpenAiHostedWebSearchSynthesisControls(body: Record<string, unknow
   return next;
 }
 
-function stripAnthropicHostedWebSearchTools(body: Record<string, unknown>): Record<string, unknown> {
+export function stripAnthropicHostedWebSearchTools(body: Record<string, unknown>): Record<string, unknown> {
   if (!Array.isArray(body.tools)) {
     return body;
   }
@@ -288,7 +288,7 @@ function stripGeminiHostedWebSearchTool(tool: unknown): { changed: boolean; valu
   return Object.keys(next).length === 0 ? { changed, value: undefined } : { changed, value: next };
 }
 
-function appendAnthropicSystemText(system: unknown, text: string): unknown {
+export function appendAnthropicSystemText(system: unknown, text: string): unknown {
   if (typeof system === "string") {
     return `${system.trimEnd()}\n\n${text}`;
   }
@@ -324,7 +324,7 @@ function appendGeminiSystemInstruction(value: unknown, text: string): Record<str
   return { parts: [part] };
 }
 
-function hostedWebSearchEvidenceText(records: BrowserWebSearchProtocolRecord[], queryHint: string | undefined): string {
+export function hostedWebSearchEvidenceText(records: BrowserWebSearchProtocolRecord[], queryHint: string | undefined): string {
   const sections = records.flatMap((record, recordIndex) => {
     const resultLines = record.results.slice(0, 8).map((result, resultIndex) => {
       const content = focusedWebSearchContent(result.content, queryHint);
