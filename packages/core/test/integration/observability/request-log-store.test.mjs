@@ -36,6 +36,28 @@ test("request log model summaries support routed paths and streamed responses", 
   );
 });
 
+test("standalone traces retain the original requested and resolved models after late updates", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "ccr-route-summary-"));
+  const store = new RequestLogStore(path.join(dir, "logs.sqlite"));
+  try {
+    await store.writeBatch([{ sequence: 1, kind: "raw-trace-update", input: {
+      requestId: "route", bundleId: "route-bundle", allowStandaloneRecord: true,
+      method: "POST", path: "/v1/messages", startedAt: new Date().toISOString(), statusCode: 200,
+      model: "client-alias", requestedModel: "client-alias", resolvedModel: "physical-model"
+    } }]);
+    let row = (await store.list()).items[0];
+    assert.equal(row.requestedModel, "client-alias");
+    assert.equal(row.resolvedModel, "physical-model");
+    await store.updateFromRawTrace({ requestId: "route", requestedModel: "physical-model", resolvedModel: "physical-model" });
+    row = (await store.list()).items[0];
+    assert.equal(row.requestedModel, "client-alias");
+    assert.equal(row.resolvedModel, "physical-model");
+  } finally {
+    await store.close();
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
 test("RequestLogStore backfills model summaries when upgrading an existing database", async () => {
   const dir = mkdtempSync(path.join(tmpdir(), "ccr-request-log-model-migration-test-"));
   const dbFile = path.join(dir, "request-logs.sqlite");
