@@ -2,358 +2,372 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createDefaultAppConfig } from "@ccr/core/config/default-config.ts";
 import { parseProvidersForTest } from "@ccr/core/config/config.ts";
+import { readProviderCredentialCooldown } from "@ccr/core/providers/credential-pool.ts";
 import {
   bailianEnhancedSearchEndpointEnv,
-  normalizeBailianEnhancedSearchQuery,
-  searchBailianEnhancedWeb
-} from "@ccr/core/gateway/features/bailian-enhanced-search/index.ts";
-import {
-  handleBailianEnhancedSearchSideQuery,
+  executeBailianEnhancedSearchSideQuery,
+  prepareBailianEnhancedSearchSideQuery,
   isBailianEnhancedSearchSideQueryBody,
+  normalizeBailianEnhancedSearchQuery,
   stripClaudeCodeWebSearchQueryPrefix
-} from "@ccr/core/gateway/features/bailian-enhanced-search/side-query.ts";
-import { ccrBailianEnhancedSearchRouteKey } from "@ccr/core/gateway/core-runtime/router-plugin-contract.ts";
-import { createGatewayPlugin } from "@ccr/core/gateway/core-runtime/router-plugin.ts";
+} from "@ccr/core/gateway/features/bailian-enhanced-search/index.ts";
 
-const loopbackEndpoint = "http://127.0.0.1/bailian-enhanced-search-mcp";
-
-function mcpSearchResponse(pages) {
-  return new Response(JSON.stringify({
-    jsonrpc: "2.0",
-    id: 2,
-    result: {
-      content: [{ text: JSON.stringify({ pages }), type: "text" }]
-    }
-  }), { headers: { "content-type": "application/json" }, status: 200 });
-}
-
-function installMcpFetchStub(responses) {
-  const requests = [];
-  const previousFetch = globalThis.fetch;
-  globalThis.fetch = async (input, init) => {
-    requests.push({ body: JSON.parse(String(init?.body ?? "{}")), url: String(input) });
-    const next = responses.shift();
-    if (!next) {
-      throw new Error("Unexpected extra MCP request.");
-    }
-    return next instanceof Response ? next : new Response(next.body, { headers: { "content-type": "application/json" }, status: next.status });
-  };
-  return {
-    requests,
-    restore() {
-      globalThis.fetch = previousFetch;
-    }
-  };
-}
-
-function sideQueryRequestBody(query, options = {}) {
+function requestBody(query = "上海天气", stream = false) {
   return {
     max_tokens: 4096,
     messages: [{ content: `Perform a web search for the query: ${query}`, role: "user" }],
     model: "claude-sonnet-5",
-    stream: options.stream ?? false,
+    stream,
     system: "You are an assistant for performing a web search tool use",
     thinking: { type: "disabled" },
     tool_choice: { type: "tool", name: "web_search" },
-    tools: [{
-      allowed_domains: options.allowedDomains,
-      blocked_domains: options.blockedDomains,
-      max_uses: 8,
-      name: "web_search",
-      type: "web_search_20250305"
-    }]
+    tools: [{ max_uses: 8, name: "web_search", type: "web_search_20250305" }]
   };
 }
 
-function enabledProviderConfig() {
+function enabledConfig() {
   const config = createDefaultAppConfig();
-  config.APIKEYS = [{ key: "test-gateway-key", name: "Test key" }];
   config.Providers = [{
-    enhancedSearch: { apiKey: "sk-ws-test", enabled: true },
-    id: "bailian",
-    models: ["glm-5.3"],
-    name: "Alibaba Bailian",
-    type: "anthropic_messages"
+    enhancedSearch: { apiKey: "test-search-key", enabled: true },
+    id: "bailian", models: ["glm-5.3"], name: "Alibaba Bailian", type: "anthropic_messages"
+  }, {
+    id: "other", models: ["other-model"], name: "Other provider", type: "anthropic_messages"
   }];
   return config;
 }
 
-function mockReply() {
-  const state = { body: undefined, code: undefined, ended: false, headers: undefined, hijacked: false, sent: false };
-  const chunks = [];
-  const reply = {
-    code(status) {
-      state.code = status;
-      return { send(payload) { state.sent = true; state.body = payload; return payload; } };
-    },
-    hijack() {
-      state.hijacked = true;
-    },
-    get raw() {
-      return {
-        writeHead(status, headers) {
-          state.code = status;
-          state.headers = headers;
-        },
-        write(chunk) {
-          chunks.push(String(chunk));
-        },
-        end() {
-          state.ended = true;
-          state.sent = true;
-        }
-      };
-    },
-    send(payload) {
-      state.sent = true;
-      state.body = payload;
-      return payload;
-    }
-  };
-  return { chunks, reply, state };
+function prepare(config = enabledConfig(), body = requestBody(), routedModel = "bailian/glm-5.3") {
+  return prepareBailianEnhancedSearchSideQuery({ config, method: "POST", path: "/v1/messages", body: Buffer.from(JSON.stringify(body)), routedModel });
 }
 
-function withLoopbackEndpoint(run) {
-  return async () => {
-    const previous = process.env[bailianEnhancedSearchEndpointEnv];
-    process.env[bailianEnhancedSearchEndpointEnv] = loopbackEndpoint;
-    try {
-      await run();
-    } finally {
-      if (previous === undefined) {
-        delete process.env[bailianEnhancedSearchEndpointEnv];
-      } else {
-        process.env[bailianEnhancedSearchEndpointEnv] = previous;
+async function withMcp(pages, run) {
+  const previousFetch = globalThis.fetch;
+  const previousEndpoint = process.env[bailianEnhancedSearchEndpointEnv];
+  const calls = [];
+  process.env[bailianEnhancedSearchEndpointEnv] = "http://127.0.0.1/bailian-enhanced-search-mcp";
+  globalThis.fetch = async (_input, init) => {
+    const payload = JSON.parse(String(init?.body));
+    calls.push({ payload, headers: init?.headers });
+    if (payload.method === "notifications/initialized") {
+      return new Response(null, { status: 202 });
+    }
+    const result = payload.method === "initialize" ? {} : { content: [{ type: "text", text: JSON.stringify({ pages }) }] };
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: payload.id, result }), { headers: { "content-type": "application/json" } });
+  };
+  try {
+    await run(calls);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousEndpoint === undefined) delete process.env[bailianEnhancedSearchEndpointEnv];
+    else process.env[bailianEnhancedSearchEndpointEnv] = previousEndpoint;
+  }
+}
+
+function reconstructSse(text) {
+  const events = text.trim().split(/\n\n/).map((event) => JSON.parse(event.split("\ndata: ")[1]));
+  let message;
+  const jsonDeltas = new Map();
+  for (const event of events) {
+    if (event.type === "message_start") message = event.message;
+    else if (event.type === "content_block_start") message.content[event.index] = structuredClone(event.content_block);
+    else if (event.type === "content_block_delta") {
+      const block = message.content[event.index];
+      if (event.delta.type === "text_delta") block.text += event.delta.text;
+      else if (event.delta.type === "input_json_delta") {
+        jsonDeltas.set(event.index, (jsonDeltas.get(event.index) ?? "") + event.delta.partial_json);
       }
+    } else if (event.type === "content_block_stop" && jsonDeltas.has(event.index)) {
+      message.content[event.index].input = JSON.parse(jsonDeltas.get(event.index));
+    } else if (event.type === "message_delta") {
+      Object.assign(message, event.delta);
+      Object.assign(message.usage, event.usage);
     }
-  };
+  }
+  return { events, message };
 }
 
-test("normalizeBailianEnhancedSearchQuery trims, clamps, and rejects short queries", () => {
+const pages = [{ title: "上海天气", url: "https://weather.example.test/shanghai", snippet: "上海多云 24-31 度" }];
+
+test("side-query detection requires the dedicated single-user search prompt and server tool", () => {
+  assert.equal(isBailianEnhancedSearchSideQueryBody(requestBody()), true);
+  const dated = requestBody();
+  dated.tools[0].type = "web_search_20260209";
+  assert.equal(isBailianEnhancedSearchSideQueryBody(dated), true);
+  const blocks = requestBody();
+  blocks.messages[0].content = [{ type: "text", text: "Perform a web search for the query:" }, { type: "text", text: "上海天气" }];
+  assert.equal(isBailianEnhancedSearchSideQueryBody(blocks), true);
+  assert.equal(prepare(enabledConfig(), blocks).query, "上海天气");
+
+  for (const change of [
+    (body) => { body.messages[0].content = "Hello. Please explain this code."; },
+    (body) => { body.messages.push({ role: "assistant", content: "earlier answer" }); },
+    (body) => { body.messages[0].role = "assistant"; },
+    (body) => { body.messages[0].content = [{ type: "tool_result", content: "Perform a web search for the query: text" }]; },
+    (body) => { body.tools.push({ name: "Bash" }); },
+    (body) => { body.tools[0] = { name: "web_search", input_schema: { type: "object" } }; },
+    (body) => { body.tools[0] = { name: "WebSearch", input_schema: { type: "object" } }; },
+    (body) => { body.tools[0] = { name: "google_search", type: "google_search" }; },
+    (body) => { body.tools[0].type = "web_search_custom"; },
+    (body) => { body.tool_choice = { type: "none" }; },
+    (body) => { body.tool_choice = { type: "tool", name: "Bash" }; }
+  ]) {
+    const body = requestBody();
+    change(body);
+    assert.equal(isBailianEnhancedSearchSideQueryBody(body), false, JSON.stringify(body));
+    assert.equal(prepare(enabledConfig(), body), undefined);
+  }
+});
+
+test("preparation uses the routed provider and preserves the client model", () => {
+  const config = enabledConfig();
+  const context = prepare(config);
+  assert.equal(context.provider, config.Providers[0]);
+  assert.equal(context.model, "claude-sonnet-5");
+  assert.equal(context.query, "上海天气");
+  assert.equal(prepare(config, requestBody(), "other/other-model"), undefined);
+  assert.equal(prepare(config, requestBody(), "missing/no-model"), undefined);
+  config.Providers[0].enhancedSearch.enabled = false;
+  assert.equal(prepare(config), undefined);
+  config.Providers[0].enhancedSearch.enabled = true;
+  config.Providers[0].enabled = false;
+  assert.equal(prepare(config), undefined);
+});
+
+test("preparation only handles the messages endpoint and valid JSON", () => {
+  const args = { config: enabledConfig(), method: "POST", path: "/v1/messages", body: Buffer.from(JSON.stringify(requestBody())), routedModel: "bailian/glm-5.3" };
+  for (const patch of [{ method: "GET" }, { path: "/v1/messages/count_tokens" }, { path: "/v1/chat/completions" }, { body: undefined }, { body: Buffer.from("not json") }]) {
+    assert.equal(prepareBailianEnhancedSearchSideQuery({ ...args, ...patch }), undefined);
+  }
+});
+
+test("routed body controls search semantics while requestedModel only controls the reply model", async () => {
+  const body = requestBody("路由修改后的查询", true);
+  body.model = "bailian/glm-5.3";
+  body.tools[0].allowed_domains = ["weather.example.test"];
+  const input = {
+    config: enabledConfig(), method: "POST", path: "/v1/messages",
+    body: Buffer.from(JSON.stringify(body)), requestedModel: "claude-sonnet-5"
+  };
+  const context = prepareBailianEnhancedSearchSideQuery(input);
+  assert.equal(context.provider.id, "bailian");
+  assert.equal(context.query, "路由修改后的查询");
+  assert.equal(context.stream, true);
+  assert.equal(context.model, "claude-sonnet-5");
+  await withMcp([...pages, { title: "Excluded", url: "https://other.test/result" }], async (calls) => {
+    const response = await executeBailianEnhancedSearchSideQuery(context);
+    const { message } = reconstructSse(response.body);
+    assert.equal(message.model, "claude-sonnet-5");
+    assert.equal(calls.at(-1).payload.params.arguments.query, "路由修改后的查询");
+    assert.deepEqual(message.content[1].content.map((result) => result.url), [pages[0].url]);
+  });
+  delete body.tools;
+  assert.equal(prepareBailianEnhancedSearchSideQuery({ ...input, body: Buffer.from(JSON.stringify(body)) }), undefined);
+});
+
+test("JSON replies preserve tool-result pairing and report only search usage", async () => {
+  await withMcp(pages, async (calls) => {
+    const reply = await executeBailianEnhancedSearchSideQuery(prepare());
+    assert.equal(reply.statusCode, 200);
+    const message = JSON.parse(reply.body);
+    assert.equal(message.model, "claude-sonnet-5");
+    assert.equal(message.stop_reason, "end_turn");
+    assert.deepEqual(message.content[0].input, { query: "上海天气" });
+    assert.equal(message.content[1].tool_use_id, message.content[0].id);
+    assert.deepEqual(message.content[1].content, [{ type: "web_search_result", title: "上海天气", url: pages[0].url }]);
+    assert.match(message.content[2].text, /上海多云 24-31 度/);
+    assert.deepEqual(message.usage, { input_tokens: 0, output_tokens: 0, server_tool_use: { web_search_requests: 1 } });
+    assert.equal(calls.length, 3);
+    assert.equal(calls[2].payload.params.arguments.query, "上海天气");
+    assert.equal(calls[0].headers.authorization, "Bearer test-search-key");
+  });
+});
+
+test("Anthropic SSE reconstructs each query and result text exactly once", async () => {
+  await withMcp(pages, async () => {
+    const streamed = await executeBailianEnhancedSearchSideQuery(prepare(enabledConfig(), requestBody("上海天气", true)));
+    const plain = JSON.parse((await executeBailianEnhancedSearchSideQuery(prepare())).body);
+    assert.match(streamed.headers["content-type"], /^text\/event-stream/);
+    const { events, message } = reconstructSse(streamed.body);
+    const starts = events.filter((event) => event.type === "content_block_start");
+    assert.deepEqual(starts[0].content_block.input, {});
+    assert.equal(starts[2].content_block.text, "");
+    assert.equal(events.filter((event) => event.type === "content_block_delta" && event.index === 1).length, 0);
+    assert.deepEqual(message.content[0].input, plain.content[0].input);
+    assert.deepEqual(message.content[1].content, plain.content[1].content);
+    assert.equal(message.content[2].text, plain.content[2].text);
+    assert.deepEqual(message.usage, plain.usage);
+    assert.equal(message.stop_reason, "end_turn");
+    assert.equal(events.at(-1).type, "message_stop");
+  });
+});
+
+test("domain filters include subdomains and paths without matching suffix impostors", async () => {
+  const candidates = [
+    { title: "root", url: "https://example.test/blog/a" },
+    { title: "subdomain", url: "https://docs.example.test/blog/b" },
+    { title: "other path", url: "https://example.test/news/a" },
+    { title: "suffix impostor", url: "https://badexample.test/blog/a" },
+    { title: "nested suffix", url: "https://example.test.evil.test/blog/a" }
+  ];
+  await withMcp(candidates, async () => {
+    const allowed = requestBody();
+    allowed.tools[0].allowed_domains = ["example.test/blog/*"];
+    const message = JSON.parse((await executeBailianEnhancedSearchSideQuery(prepare(enabledConfig(), allowed))).body);
+    assert.deepEqual(message.content[1].content.map((result) => result.title), ["root", "subdomain"]);
+    const blocked = requestBody();
+    blocked.tools[0].blocked_domains = ["example.test"];
+    const reply = JSON.parse((await executeBailianEnhancedSearchSideQuery(prepare(enabledConfig(), blocked))).body);
+    assert.deepEqual(reply.content[1].content.map((result) => result.title), ["suffix impostor", "nested suffix"]);
+  });
+});
+
+test("invalid search options fail before reaching MCP", async () => {
+  await withMcp(pages, async (calls) => {
+    for (const fields of [
+      { allowed_domains: ["example.test"], blocked_domains: ["blocked.test"] },
+      { allowed_domains: ["https://example.test"] }, { allowed_domains: ["*.example.test"] },
+      { allowed_domains: "example.test" }, { allowed_domains: [null] }, { max_uses: 0 }
+    ]) {
+      const body = requestBody();
+      Object.assign(body.tools[0], fields);
+      const reply = await executeBailianEnhancedSearchSideQuery(prepare(enabledConfig(), body));
+      assert.equal(reply.statusCode, 400);
+      assert.equal(JSON.parse(reply.body).error.type, "invalid_request_error");
+    }
+    assert.equal((await executeBailianEnhancedSearchSideQuery(prepare(enabledConfig(), requestBody(" ")))).statusCode, 400);
+    assert.equal(calls.length, 0);
+  });
+});
+
+test("dedicated keys take precedence and credential pools honor enabled flags and request limits", async () => {
+  await withMcp(pages, async (calls) => {
+    const config = enabledConfig();
+    const provider = config.Providers[0];
+    provider.name = `Credential pool ${Date.now()}`;
+    provider.api_key = "stale-legacy-key";
+    provider.credentials = [
+      { id: "disabled", api_key: "disabled-key", enabled: false, priority: 0 },
+      { id: "first", api_key: "pool-first-key", priority: 1, limits: { rpm: 1 } },
+      { id: "second", apiKey: "pool-second-key", priority: 2, limits: { rpm: 1 } }
+    ];
+    const context = prepare(config);
+    assert.equal((await executeBailianEnhancedSearchSideQuery(context)).statusCode, 200);
+    assert.equal(calls[0].headers.authorization, "Bearer test-search-key");
+    delete provider.enhancedSearch.apiKey;
+    assert.equal((await executeBailianEnhancedSearchSideQuery(context)).statusCode, 200);
+    assert.equal(calls[3].headers.authorization, "Bearer pool-first-key");
+    assert.equal((await executeBailianEnhancedSearchSideQuery(context)).statusCode, 200);
+    assert.equal(calls[6].headers.authorization, "Bearer pool-second-key");
+    assert.equal((await executeBailianEnhancedSearchSideQuery(context)).statusCode, 503);
+    provider.credentials.forEach((credential) => { credential.enabled = false; });
+    assert.equal((await executeBailianEnhancedSearchSideQuery(context)).statusCode, 503);
+    assert.equal(calls.length, 9);
+  });
+});
+
+test("legacy provider keys still work and missing keys do not trigger searches", async () => {
+  await withMcp(pages, async (calls) => {
+    const config = enabledConfig();
+    config.Providers[0].enhancedSearch = { enabled: true };
+    assert.equal((await executeBailianEnhancedSearchSideQuery(prepare(config))).statusCode, 503);
+    assert.equal(calls.length, 0);
+    config.Providers[0].api_key = " legacy-key ";
+    assert.equal((await executeBailianEnhancedSearchSideQuery(prepare(config))).statusCode, 200);
+    assert.equal(calls[0].headers.authorization, "Bearer legacy-key");
+  });
+});
+
+test("HTTP search refusals cool down only that pool key for subsequent searches", async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  for (const status of [401, 403, 429]) {
+    await withMcp(pages, async () => {
+      const config = enabledConfig();
+      const provider = config.Providers[0];
+      provider.enhancedSearch = { enabled: true };
+      provider.credentials = [
+        { id: `rejected-${status}`, api_key: `rejected-key-${status}`, priority: 1 },
+        { id: `working-${status}`, api_key: `working-key-${status}`, priority: 2 }
+      ];
+      const [first, second] = provider.credentials;
+      const originalKey = first.api_key;
+      const fetchSuccess = globalThis.fetch;
+      const searchedKeys = [];
+      let rejectFirst = true;
+      globalThis.fetch = async (input, init) => {
+        if (JSON.parse(init.body).method === "tools/call") {
+          searchedKeys.push(init.headers.authorization);
+          if (rejectFirst && init.headers.authorization === `Bearer ${originalKey}`) {
+            return new Response(null, { status });
+          }
+        }
+        return fetchSuccess(input, init);
+      };
+      const context = prepare(config);
+      assert.equal((await executeBailianEnhancedSearchSideQuery(context)).statusCode, 502);
+      assert.deepEqual(searchedKeys, [`Bearer ${originalKey}`], "do not replay the current search with another credential");
+      assert.equal(readProviderCredentialCooldown(provider, first), undefined, "model access must not inherit search-only failures");
+      assert.equal((await executeBailianEnhancedSearchSideQuery(context)).statusCode, 200);
+      assert.equal(searchedKeys.at(-1), `Bearer ${second.api_key}`);
+
+      first.api_key = `edited-key-${status}`;
+      assert.equal((await executeBailianEnhancedSearchSideQuery(context)).statusCode, 200);
+      assert.equal(searchedKeys.at(-1), `Bearer ${first.api_key}`, "editing a rejected key clears its effective search cooldown");
+
+      first.api_key = originalKey;
+      rejectFirst = false;
+      now += 60_001;
+      assert.equal((await executeBailianEnhancedSearchSideQuery(context)).statusCode, 200);
+      assert.equal(searchedKeys.at(-1), `Bearer ${originalKey}`, "expired cooldowns restore normal priority");
+    });
+  }
+});
+
+test("HTTP server failures do not put pool keys in search refusal cooldown", async () => {
+  await withMcp(pages, async () => {
+    const config = enabledConfig();
+    config.Providers[0].enhancedSearch = { enabled: true };
+    config.Providers[0].credentials = [{ id: "server-error", api_key: "server-error-key" }];
+    const context = prepare(config);
+    const fetchSuccess = globalThis.fetch;
+    globalThis.fetch = async () => new Response(null, { status: 500 });
+    assert.equal((await executeBailianEnhancedSearchSideQuery(context)).statusCode, 502);
+    globalThis.fetch = fetchSuccess;
+    assert.equal((await executeBailianEnhancedSearchSideQuery(context)).statusCode, 200);
+  });
+});
+
+test("search failures return a redacted Anthropic error and cancellation propagates", async () => {
+  await withMcp(pages, async () => {
+    globalThis.fetch = async () => { throw new Error("private-upstream-content test-search-key"); };
+    const reply = await executeBailianEnhancedSearchSideQuery(prepare());
+    assert.equal(reply.statusCode, 502);
+    assert.equal(JSON.parse(reply.body).type, "error");
+    assert.doesNotMatch(reply.body, /private-upstream-content|test-search-key/);
+    const controller = new AbortController();
+    controller.abort();
+    await assert.rejects(executeBailianEnhancedSearchSideQuery(prepare(), controller.signal), { name: "AbortError" });
+  });
+});
+
+test("search results and snippets have bounded reply size", async () => {
+  await withMcp(Array.from({ length: 30 }, (_, index) => ({ title: `Result ${index}`, url: `https://example.test/${index}`, snippet: "x".repeat(20_000) })), async () => {
+    const reply = await executeBailianEnhancedSearchSideQuery(prepare());
+    assert.equal(JSON.parse(reply.body).content[1].content.length, 8);
+    assert.ok(Buffer.byteLength(reply.body) < 50_000);
+  });
+});
+
+test("query normalization strips the dedicated prefix, trims and clamps", () => {
+  assert.equal(stripClaudeCodeWebSearchQueryPrefix("Perform a web search for the query: 上海天气"), "上海天气");
   assert.equal(normalizeBailianEnhancedSearchQuery("  claude code  "), "claude code");
   assert.equal(normalizeBailianEnhancedSearchQuery("a"), undefined);
-  assert.equal(normalizeBailianEnhancedSearchQuery(undefined), undefined);
   assert.equal(normalizeBailianEnhancedSearchQuery("x".repeat(600)).length, 500);
 });
 
-test("side query detection matches Claude Code web search requests only", () => {
-  assert.equal(isBailianEnhancedSearchSideQueryBody(sideQueryRequestBody("上海天气")), true);
-  assert.equal(isBailianEnhancedSearchSideQueryBody({ ...sideQueryRequestBody("x"), tools: [{ name: "web_search", type: "web_search_20260209" }] }), true);
-  assert.equal(isBailianEnhancedSearchSideQueryBody({ ...sideQueryRequestBody("x"), tools: [{ name: "google_search", type: "google_search" }] }), true);
-  // A main conversation request with regular tools is not a side query.
-  assert.equal(isBailianEnhancedSearchSideQueryBody({
-    messages: [{ content: "hello", role: "user" }],
-    tools: [
-      { name: "WebSearch", description: "Search", input_schema: { type: "object" } },
-      { name: "Bash", description: "Run", input_schema: { type: "object" } }
-    ]
-  }), false);
-  assert.equal(isBailianEnhancedSearchSideQueryBody({ messages: [{ content: "hello", role: "user" }] }), false);
-  assert.equal(isBailianEnhancedSearchSideQueryBody({ ...sideQueryRequestBody("x"), tools: [{ name: "web_search", type: "web_search_20250305" }, { name: "Bash" }] }), false);
-});
-
-test("Claude Code web search query prefix is stripped", () => {
-  assert.equal(stripClaudeCodeWebSearchQueryPrefix("Perform a web search for the query: 上海天气"), "上海天气");
-  assert.equal(stripClaudeCodeWebSearchQueryPrefix("Perform a web search for the query:   上海天气  "), "上海天气  ");
-  assert.equal(stripClaudeCodeWebSearchQueryPrefix("上海天气"), "上海天气");
-});
-
-test("CCR router core plugin answers web search side queries with an Anthropic message", withLoopbackEndpoint(async () => {
-  const stub = installMcpFetchStub([
-    new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }), { headers: { "content-type": "application/json" }, status: 200 }),
-    new Response("", { status: 202 }),
-    mcpSearchResponse([
-      { snippet: "上海多云 24-31 度", title: "上海天气", url: "https://example.test/shanghai" },
-      { snippet: "", title: "", url: "" }
-    ])
-  ]);
-  try {
-    const plugin = await createGatewayPlugin({ plugin: { config: { appConfig: enabledProviderConfig() } } });
-    const route = plugin.httpRoutes.find((item) => item.key === ccrBailianEnhancedSearchRouteKey);
-    assert.ok(route);
-    assert.equal(route.method, "POST");
-    assert.equal(route.path, "/v1/messages");
-    assert.equal(route.priority, "pre");
-    assert.equal(route.auth, "none");
-
-    const { reply, state } = mockReply();
-    await route.handler({ request: { body: sideQueryRequestBody("上海天气"), headers: { authorization: "Bearer test-gateway-key" } }, reply });
-
-    assert.equal(state.sent, true);
-    assert.equal(state.code, 200);
-    const message = state.body;
-    assert.equal(message.type, "message");
-    assert.equal(message.role, "assistant");
-    assert.equal(message.model, "claude-sonnet-5");
-    assert.equal(message.stop_reason, "end_turn");
-    assert.equal(message.content.length, 3);
-    assert.equal(message.content[0].type, "server_tool_use");
-    assert.equal(message.content[0].name, "web_search");
-    assert.equal(message.content[0].input.query, "上海天气");
-    assert.equal(message.content[1].type, "web_search_tool_result");
-    assert.equal(message.content[1].tool_use_id, message.content[0].id);
-    assert.deepEqual(message.content[1].content, [
-      { page_content: "上海多云 24-31 度", title: "上海天气", type: "web_search_result", url: "https://example.test/shanghai" }
-    ]);
-    assert.equal(message.content[2].type, "text");
-    assert.match(message.content[2].text, /Here are the search results for "上海天气":/);
-    assert.match(message.content[2].text, /https:\/\/example\.test\/shanghai/);
-
-    // The search used the stripped query, not the prefixed message.
-    assert.equal(stub.requests.at(-1).body.params.arguments.query, "上海天气");
-  } finally {
-    stub.restore();
-  }
-}));
-
-test("side query route streams the search reply as Anthropic SSE", withLoopbackEndpoint(async () => {
-  const stub = installMcpFetchStub([
-    new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }), { headers: { "content-type": "application/json" }, status: 200 }),
-    new Response("", { status: 202 }),
-    mcpSearchResponse([{ snippet: "杭州晴", title: "杭州天气", url: "https://example.test/hangzhou" }])
-  ]);
-  try {
-    const plugin = await createGatewayPlugin({ plugin: { config: { appConfig: enabledProviderConfig() } } });
-    const route = plugin.httpRoutes.find((item) => item.key === ccrBailianEnhancedSearchRouteKey);
-    const { chunks, reply, state } = mockReply();
-    await route.handler({ request: { body: sideQueryRequestBody("杭州天气", { stream: true }), headers: { authorization: "Bearer test-gateway-key" } }, reply });
-
-    assert.equal(state.hijacked, true);
-    assert.equal(state.code, 200);
-    assert.equal(state.headers["content-type"], "text/event-stream");
-    assert.equal(state.ended, true);
-    const text = chunks.join("");
-    assert.match(text, /event: message_start\ndata: \{"message":/);
-    assert.match(text, /"type":"server_tool_use"/);
-    assert.match(text, /"input":\{"query":"杭州天气"\}/);
-    assert.match(text, /"type":"web_search_tool_result"/);
-    assert.match(text, /"type":"web_search_result","title":"杭州天气","url":"https:\/\/example\.test\/hangzhou"/);
-    assert.match(text, /"type":"content_block_delta"/);
-    assert.match(text, /"stop_reason":"end_turn"/);
-    assert.match(text, /event: message_stop/);
-  } finally {
-    stub.restore();
-  }
-}));
-
-test("side query route passes requests through when gates do not hit", withLoopbackEndpoint(async () => {
-  const plugin = await createGatewayPlugin({ plugin: { config: { appConfig: enabledProviderConfig() } } });
-  const route = plugin.httpRoutes.find((item) => item.key === ccrBailianEnhancedSearchRouteKey);
-
-  // Main conversation traffic (several tools) is untouched.
-  const main = mockReply();
-  await route.handler({
-    request: {
-      body: {
-        messages: [{ content: "帮我修个 bug", role: "user" }],
-        model: "claude-sonnet-5",
-        stream: true,
-        tools: [
-          { name: "WebSearch", description: "Search the web", input_schema: { type: "object" } },
-          { name: "Bash", description: "Run a command", input_schema: { type: "object" } },
-          { name: "Read", description: "Read a file", input_schema: { type: "object" } }
-        ]
-      }
-    },
-    reply: main.reply
-  });
-  // Only one tool but it is the client-side WebSearch tool, not a server tool.
-  await route.handler({
-    request: { body: { ...sideQueryRequestBody("x"), tools: [{ name: "WebSearch", input_schema: { type: "object" } }] } },
-    reply: main.reply
-  });
-  assert.equal(main.state.sent, false);
-
-  // Feature disabled: side queries fall through untouched.
-  const disabledConfig = createDefaultAppConfig();
-  disabledConfig.Providers = [{
-    enhancedSearch: { enabled: false },
-    id: "bailian",
-    models: ["glm-5.3"],
-    name: "Alibaba Bailian",
-    type: "anthropic_messages"
-  }];
-  const disabledPlugin = await createGatewayPlugin({ plugin: { config: { appConfig: disabledConfig } } });
-  const disabledRoute = disabledPlugin.httpRoutes.find((item) => item.key === ccrBailianEnhancedSearchRouteKey);
-  const disabled = mockReply();
-  await disabledRoute.handler({ request: { body: sideQueryRequestBody("上海天气") }, reply: disabled.reply });
-  assert.equal(disabled.state.sent, false);
-}));
-
-test("side query route reports search failures as Anthropic API errors", withLoopbackEndpoint(async () => {
-  const stub = installMcpFetchStub([{ body: "", status: 500 }, { body: "", status: 500 }, { body: "", status: 500 }, { body: "", status: 500 }, { body: "", status: 500 }, { body: "", status: 500 }]);
-  try {
-    const plugin = await createGatewayPlugin({ plugin: { config: { appConfig: enabledProviderConfig() } } });
-    const route = plugin.httpRoutes.find((item) => item.key === ccrBailianEnhancedSearchRouteKey);
-    const { reply, state } = mockReply();
-    await route.handler({ request: { body: sideQueryRequestBody("上海天气"), headers: { authorization: "Bearer test-gateway-key" } }, reply });
-
-    assert.equal(state.sent, true);
-    assert.equal(state.code, 502);
-    assert.equal(state.body.type, "error");
-    assert.equal(state.body.error.type, "api_error");
-    assert.match(state.body.error.message, /Bailian enhanced web search failed/);
-  } finally {
-    stub.restore();
-  }
-}));
-
-test("searchBailianEnhancedWeb performs the MCP handshake and maps pages to results", withLoopbackEndpoint(async () => {
-  const stub = installMcpFetchStub([
-    new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { protocolVersion: "2024-11-05", serverInfo: { name: "BaiLianMcpServer", version: "1.0.0" } } }), { headers: { "content-type": "application/json" }, status: 200 }),
-    new Response("", { status: 202 }),
-    mcpSearchResponse([
-      { hostname: "example.test", snippet: "Release notes snippet", title: "Release notes", url: "https://example.test/release" },
-      { hostname: "empty.test", snippet: "", title: "", url: "" }
-    ])
-  ]);
-  try {
-    const results = await searchBailianEnhancedWeb({ apiKey: "sk-ws-test", query: "claude code router", timeoutMs: 5_000 });
-    assert.deepEqual(results, [
-      { snippet: "Release notes snippet", title: "Release notes", url: "https://example.test/release" }
-    ]);
-    assert.equal(stub.requests.length, 3);
-    assert.equal(stub.requests[0].body.method, "initialize");
-    assert.equal(stub.requests[1].body.method, "notifications/initialized");
-    assert.equal(stub.requests[2].body.method, "tools/call");
-    assert.equal(stub.requests[2].body.params.name, "search_pro");
-  } finally {
-    stub.restore();
-  }
-}));
-
-test("searchBailianEnhancedWeb retries once after an empty response", withLoopbackEndpoint(async () => {
-  const stub = installMcpFetchStub([
-    { body: "", status: 200 },
-    new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }), { headers: { "content-type": "application/json" }, status: 200 }),
-    new Response("", { status: 202 }),
-    mcpSearchResponse([{ title: "Retry result", url: "https://example.test/retry" }])
-  ]);
-  try {
-    const results = await searchBailianEnhancedWeb({ apiKey: "sk-ws-test", query: "retry query", timeoutMs: 5_000 });
-    assert.equal(results.length, 1);
-    assert.equal(results[0].title, "Retry result");
-    assert.equal(stub.requests.length, 4);
-  } finally {
-    stub.restore();
-  }
-}));
-
-test("provider enhancedSearch config parses from persisted provider payloads", () => {
-  const providers = parseProvidersForTest([{
-    enhancedSearch: { apiKey: "  sk-ws-key  ", enabled: true },
-    models: ["qwen3.7-max"],
-    name: "Bailian",
-    type: "anthropic_messages"
-  }]);
-  assert.equal(providers?.length, 1);
-  assert.deepEqual(providers[0].enhancedSearch, { apiKey: "sk-ws-key", enabled: true });
-
-  const disabled = parseProvidersForTest([{
-    enhancedSearch: { enabled: false },
-    models: ["qwen3.7-max"],
-    name: "Bailian",
-    type: "anthropic_messages"
-  }]);
-  assert.equal(disabled?.[0].enhancedSearch, undefined);
+test("provider enhancedSearch settings parse without retaining disabled empty values", () => {
+  const providers = parseProvidersForTest([{ enhancedSearch: { apiKey: "  search-key  ", enabled: true }, models: ["qwen-max"], name: "Bailian", type: "anthropic_messages" }]);
+  assert.deepEqual(providers[0].enhancedSearch, { apiKey: "search-key", enabled: true });
+  const disabled = parseProvidersForTest([{ enhancedSearch: { enabled: false }, models: ["qwen-max"], name: "Bailian", type: "anthropic_messages" }]);
+  assert.equal(disabled[0].enhancedSearch, undefined);
 });
