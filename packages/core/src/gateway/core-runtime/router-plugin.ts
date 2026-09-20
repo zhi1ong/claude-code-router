@@ -17,9 +17,7 @@ import {
   ccrCodexBridgeRequestTransformKey,
   ccrCodexBridgeResponseHookKey,
   ccrCodexBridgeStreamHookKey,
-  ccrBailianEnhancedSearchRequestTransformKey,
-  ccrBailianEnhancedSearchResponseHookKey,
-  ccrBailianEnhancedSearchStreamHookKey,
+  ccrBailianEnhancedSearchRouteKey,
   ccrCodexMultiAgentBridgeHeader,
   ccrLiveTokenRateConfigMessageType,
   ccrLiveTokenRateSnapshotMessageType,
@@ -63,9 +61,7 @@ import {
   transformCodexMultiAgentBridgeResponseValue
 } from "@ccr/core/gateway/features/codex-multi-agent-bridge";
 import {
-  applyBailianEnhancedSearchBridgeRequestTransform,
-  applyBailianEnhancedSearchBridgeResponseTransform,
-  applyBailianEnhancedSearchBridgeStreamTransform
+  handleBailianEnhancedSearchSideQuery
 } from "@ccr/core/gateway/features/bailian-enhanced-search";
 import { requestLogRequestedModel } from "@ccr/core/observability/request-log-model";
 import { createStreamExperienceMeter, LiveTokenRateTracker } from "@ccr/core/observability/stream-experience";
@@ -360,6 +356,21 @@ export async function createGatewayPlugin(input: GatewayPluginFactoryInput = {})
         }
         return router.countTokens(body);
       }
+    }, {
+      // Answers Claude Code WebSearch side queries for providers with the
+      // enhanced search option. Runs in the pre-handler phase before the
+      // engine's messages handler; returning without replying lets every
+      // other request (including all main conversation traffic) through
+      // untouched.
+      auth: "gateway",
+      key: ccrBailianEnhancedSearchRouteKey,
+      method: "POST",
+      path: "/v1/messages",
+      priority: "pre",
+      handler: async ({ request, reply }: { request: GatewayPluginHttpRequest; reply: GatewayPluginHttpReply }) => {
+        await handleBailianEnhancedSearchSideQuery({ config, request, reply });
+        return undefined;
+      }
     }],
     requestHooks: [{
       key: "ccr-public-auth-context",
@@ -451,20 +462,11 @@ export async function createGatewayPlugin(input: GatewayPluginFactoryInput = {})
       stage: "beforeUpstream",
       transform: (requestInput: GatewayRequestTransformInput) =>
         applyCodexBridgeRequestTransform(config, requestInput)
-    }, {
-      key: ccrBailianEnhancedSearchRequestTransformKey,
-      stage: "beforeUpstream",
-      transform: (requestInput: GatewayRequestTransformInput) =>
-        applyBailianEnhancedSearchBridgeRequestTransform(config, requestInput)
     }],
     responseHooks: [{
       key: ccrCodexBridgeResponseHookKey,
       transformResponse: (responseInput: GatewayResponseHookInput) =>
         applyCodexBridgeResponseTransform(responseInput)
-    }, {
-      key: ccrBailianEnhancedSearchResponseHookKey,
-      transformResponse: (responseInput: GatewayResponseHookInput) =>
-        applyBailianEnhancedSearchBridgeResponseTransform(responseInput)
     }, {
       key: ccrOpenRouterDiscountFinalizeResponseHookKey,
       transformResponse: (responseInput: GatewayResponseHookInput) => {
@@ -476,10 +478,6 @@ export async function createGatewayPlugin(input: GatewayPluginFactoryInput = {})
       key: ccrCodexBridgeStreamHookKey,
       transformResponse: (streamInput: GatewayStreamHookInput) =>
         applyCodexBridgeStreamTransform(streamInput)
-    }, {
-      key: ccrBailianEnhancedSearchStreamHookKey,
-      transformResponse: (streamInput: GatewayStreamHookInput) =>
-        applyBailianEnhancedSearchBridgeStreamTransform(streamInput)
     }, {
       key: ccrOpenRouterDiscountFinalizeStreamHookKey,
       transformResponse: (streamInput: GatewayStreamHookInput) => {

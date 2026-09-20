@@ -2363,7 +2363,7 @@ export const appCopy: Record<ResolvedLanguage, AppCopy> = {
       "US (Virginia)": "美国（弗吉尼亚）",
       "Hong Kong (China)": "中国香港",
       "Enhanced web search": "增强搜索",
-      "Intercept the Anthropic web_search server tool, run it through Bailian enhanced search, and return the results. Requires an Anthropic protocol endpoint. If the search fails, the request fails with a diagnostic instead of reaching the upstream.": "拦截 Anthropic 协议请求中的 web_search 服务端工具，改由百炼增强搜索执行并回填结果。需要启用 Anthropic 协议端点。搜索失败时请求会直接返回诊断信息，而不会转发到上游。",
+      "Run Claude Code web searches through Bailian enhanced search. WebSearch behaves like the official Anthropic API; main conversation requests are never modified. Leave the API key empty to use the provider API key.": "将 Claude Code 的 WebSearch 搜索交由百炼增强搜索执行，体验与官方 Anthropic API 一致；主对话请求不做任何改动。API Key 留空则使用供应商 API Key。",
       "Enhanced search API key": "增强搜索 API Key",
       "Leave empty to use the provider API key": "留空则使用供应商 API Key",
       "providers": "供应商",

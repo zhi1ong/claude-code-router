@@ -2918,7 +2918,7 @@ function ProviderBailianEnhancedSearchFields({
   onChange: (patch: Partial<AddProviderDraft>, resetProbe?: boolean) => void;
 }) {
   const t = useAppText();
-  const description = t("Intercept the Anthropic web_search server tool, run it through Bailian enhanced search, and return the results. Requires an Anthropic protocol endpoint. If the search fails, the request fails with a diagnostic instead of reaching the upstream.");
+  const description = t("Run Claude Code web searches through Bailian enhanced search. WebSearch behaves like the official Anthropic API; main conversation requests are never modified. Leave the API key empty to use the provider API key.");
   return (
     <div className="sm:col-span-2 space-y-3 rounded-md border border-border bg-background/60 p-3">
       <div className="flex min-w-0 items-center justify-between gap-3 text-[12px] font-semibold">
