@@ -1688,6 +1688,7 @@ export type ApiKeyConfig = {
   key: string;
   limits?: ApiKeyLimitConfig;
   name?: string;
+  profileId?: string;
 };
 
 export type ProxySystemStatus = {
