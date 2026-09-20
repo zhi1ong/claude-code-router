@@ -17,6 +17,7 @@ import {
   ccrCodexBridgeRequestTransformKey,
   ccrCodexBridgeResponseHookKey,
   ccrCodexBridgeStreamHookKey,
+  ccrBailianEnhancedSearchRouteKey,
   ccrCodexMultiAgentBridgeHeader,
   ccrClientVisibleModelHeader,
   ccrClientVisibleModelResponseHookKey,
@@ -67,6 +68,9 @@ import {
   prepareCodexMultiAgentBridgeRequest,
   transformCodexMultiAgentBridgeResponseValue
 } from "@ccr/core/gateway/features/codex-multi-agent-bridge";
+import {
+  handleBailianEnhancedSearchSideQuery
+} from "@ccr/core/gateway/features/bailian-enhanced-search";
 import { requestLogRequestedModel } from "@ccr/core/observability/request-log-model";
 import { createStreamExperienceMeter, LiveTokenRateTracker } from "@ccr/core/observability/stream-experience";
 import {
@@ -149,6 +153,7 @@ type GatewayRequestTransformInput = {
   };
   sourceAdapterKey?: string;
   stage?: string;
+  targetProvider?: string;
   targetProviderConfig?: Pick<GatewayProviderConfig, "provider" | "type">;
 };
 
@@ -362,6 +367,28 @@ export async function createGatewayPlugin(input: GatewayPluginFactoryInput = {})
           ? resolveClaudeDefaultTierTarget(profile, requestedModel)
           : undefined;
         return router.countTokens(countTokensTarget ? { ...body, model: countTokensTarget } : body);
+      }
+    }, {
+      // Answers Claude Code WebSearch side queries for providers with the
+      // enhanced search option. Runs in the pre-handler phase before the
+      // engine's messages handler; returning without replying lets every
+      // other request (including all main conversation traffic) through
+      // untouched. Auth is "none" so the engine's own auth chain stays the
+      // only one for declined requests; side queries validate the key inside
+      // the handler.
+      auth: "none",
+      key: ccrBailianEnhancedSearchRouteKey,
+      method: "POST",
+      path: "/v1/messages",
+      priority: "pre",
+      handler: async ({ request, reply }: { request: GatewayPluginHttpRequest; reply: GatewayPluginHttpReply }) => {
+        await handleBailianEnhancedSearchSideQuery({
+          config,
+          request,
+          reply,
+          validateApiKey: async (headers) => Boolean(await resolveApiKey(config, headers))
+        });
+        return undefined;
       }
     }],
     requestHooks: [{
