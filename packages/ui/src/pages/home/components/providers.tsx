@@ -2918,7 +2918,7 @@ function ProviderBailianEnhancedSearchFields({
   onChange: (patch: Partial<AddProviderDraft>, resetProbe?: boolean) => void;
 }) {
   const t = useAppText();
-  const description = t("Run Claude Code web searches through Bailian enhanced search. WebSearch behaves like the official Anthropic API; main conversation requests are never modified. Leave the API key empty to use the provider API key.");
+  const description = t("Handle Claude Code dedicated WebSearch queries routed to this provider with Bailian enhanced search. Leave the API key empty to use an available provider API key.");
   return (
     <div className="sm:col-span-2 space-y-3 rounded-md border border-border bg-background/60 p-3">
       <div className="flex min-w-0 items-center justify-between gap-3 text-[12px] font-semibold">

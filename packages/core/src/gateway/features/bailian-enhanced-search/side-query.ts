@@ -1,285 +1,311 @@
-import { randomUUID } from "node:crypto";
-import type { ServerResponse } from "node:http";
+import { createHash, randomUUID } from "node:crypto";
 import type { AppConfig, GatewayProviderConfig } from "@ccr/core/contracts/app";
 import { isRecord, stringValue } from "@ccr/core/gateway/internal/value";
 import type { BrowserWebSearchProtocolResult } from "@ccr/core/gateway/internal/shared";
-import { searchBailianEnhancedWeb } from "@ccr/core/gateway/features/bailian-enhanced-search/mcp";
+import { bailianEnhancedSearchHttpStatus, normalizeBailianEnhancedSearchQuery, searchBailianEnhancedWeb } from "@ccr/core/gateway/features/bailian-enhanced-search/mcp";
+import { modelRegistryForConfig, providerRuntimeId } from "@ccr/core/routing/model-registry";
+import { activeProviderCredentials, providerCredentialApiKey, providerCredentialRuntimeId, sortProviderCredentialsForConfig } from "@ccr/core/providers/runtime-topology";
+import { reserveProviderCredentialUsage } from "@ccr/core/providers/credential-pool";
 
-const bailianEnhancedSearchSideQueryTimeoutMs = 15_000;
-const bailianEnhancedSearchMaxResults = 8;
+const sideQueryTimeoutMs = 15_000;
+const maxResults = 8;
 const claudeCodeWebSearchQueryPrefix = /^perform\s+a\s+web\s+search\s+for\s+the\s+query:\s*/i;
-const bailianEnhancedSearchTokenEstimateDivisor = 4;
+const searchCredentialCooldownMs = 60_000;
+const maxSearchCredentialCooldowns = 1_024;
+const searchCredentialCooldowns = new Map<string, number>();
 
-type SideQueryRequest = {
-  body?: unknown;
-  headers?: Record<string, string | string[] | undefined>;
+type DomainFilter = { hostname: string; path?: RegExp };
+export type BailianEnhancedSearchSideQueryContext = {
+  provider: GatewayProviderConfig;
+  query: string;
+  model: string;
+  stream: boolean;
+  allowedDomains?: DomainFilter[];
+  blockedDomains?: DomainFilter[];
+  validationError?: string;
+};
+export type BailianEnhancedSearchSideQueryResponse = {
+  statusCode: number;
+  headers: Record<string, string>;
+  body: string;
+  error?: string;
 };
 
-export type BailianEnhancedSearchSideQueryReply = {
-  code(statusCode: number): { send(payload: unknown): unknown };
-  hijack?(): void;
-  raw?: ServerResponse;
-  send(payload: unknown): unknown;
-};
-
-/**
- * Answers Claude Code WebSearch side queries for providers with the enhanced
- * search option enabled. The CLI runs its own web_search tool-use loop: when it
- * needs search results it posts a dedicated /v1/messages request that declares
- * only a web_search tool with a "Perform a web search for the query: ..." user
- * message. This handler recognizes that shape, runs the query through the
- * Bailian EnhancedSearch MCP, and replies with an Anthropic message carrying
- * server_tool_use + web_search_tool_result blocks, so the client experiences
- * the official server-side web search verbatim. Every other request — including
- * the main conversation turns — is left untouched for the gateway to handle.
- */
-export async function handleBailianEnhancedSearchSideQuery(input: {
+/** Prepare only Claude Code's dedicated WebSearch request, after normal routing. */
+export function prepareBailianEnhancedSearchSideQuery(input: {
   config: AppConfig;
-  request: SideQueryRequest;
-  reply: BailianEnhancedSearchSideQueryReply;
-  validateApiKey?: (headers: Record<string, string | string[] | undefined>) => Promise<boolean>;
-}): Promise<void> {
-  const body = isRecord(input.request.body) ? input.request.body : undefined;
-  if (!body || !isBailianEnhancedSearchSideQueryBody(body)) {
-    return;
+  method: string;
+  path: string;
+  body: Buffer | undefined;
+  routedModel?: string;
+  requestedModel?: string;
+}): BailianEnhancedSearchSideQueryContext | undefined {
+  if (input.method.toUpperCase() !== "POST" || !/^\/v1\/messages\/?$/.test(input.path) || !input.body) {
+    return undefined;
   }
-  const provider = bailianEnhancedSearchSideQueryProvider(input.config);
-  if (!provider) {
-    return;
+  let body: unknown;
+  try {
+    body = JSON.parse(input.body.toString("utf8"));
+  } catch {
+    return undefined;
   }
-  // The route registers with auth "none" so that non-side-query traffic never
-  // touches the plugin auth chain before the engine handles it; side queries
-  // validate the API key here instead and fall through when it is invalid.
-  if (input.validateApiKey && !await input.validateApiKey(input.request.headers ?? {})) {
-    return;
+  if (!isRecord(body) || !isBailianEnhancedSearchSideQueryBody(body)) {
+    return undefined;
   }
-  const query = stripClaudeCodeWebSearchQueryPrefix(sideQueryUserText(body));
-  if (!query?.trim()) {
-    writeSideQueryError(input.reply, 400, "invalid_request_error", "Web search query is required.");
-    return;
+  const resolved = modelRegistryForConfig(input.config).resolve(input.routedModel ?? stringValue(body.model));
+  if (resolved?.kind !== "provider" || resolved.provider.enhancedSearch?.enabled !== true) {
+    return undefined;
   }
-  const apiKey = provider.enhancedSearch?.apiKey?.trim() || providerApiKey(provider);
-  if (!apiKey) {
-    writeSideQueryError(input.reply, 503, "api_error", "Bailian enhanced web search is enabled but no API key is configured.");
-    return;
+  const query = normalizeBailianEnhancedSearchQuery(stripClaudeCodeWebSearchQueryPrefix(sideQueryUserText(body))) ?? "";
+  const context: BailianEnhancedSearchSideQueryContext = {
+    provider: resolved.provider,
+    query,
+    model: input.requestedModel?.trim() || stringValue(body.model) || resolved.model,
+    stream: body.stream === true
+  };
+  const tool = (body.tools as Record<string, unknown>[])[0];
+  try {
+    if (!query) {
+      throw new Error("Web search query must contain at least two characters.");
+    }
+    if (tool.allowed_domains !== undefined && tool.blocked_domains !== undefined) {
+      throw new Error("Use either allowed_domains or blocked_domains, not both.");
+    }
+    context.allowedDomains = parseDomainFilters(tool.allowed_domains);
+    context.blockedDomains = parseDomainFilters(tool.blocked_domains);
+    if (tool.max_uses !== undefined && (!Number.isInteger(tool.max_uses) || Number(tool.max_uses) < 1)) {
+      throw new Error("Web search max_uses must be a positive integer.");
+    }
+  } catch (error) {
+    context.validationError = error instanceof Error ? error.message : "Invalid web search parameters.";
   }
+  return context;
+}
 
+/** Execute a bounded reply; the caller owns HTTP lifecycle, auth, limits and logs. */
+export async function executeBailianEnhancedSearchSideQuery(
+  context: BailianEnhancedSearchSideQueryContext,
+  signal?: AbortSignal
+): Promise<BailianEnhancedSearchSideQueryResponse> {
+  signal?.throwIfAborted();
+  if (context.validationError) {
+    return sideQueryError(400, "invalid_request_error", context.validationError);
+  }
+  const credential = searchCredential(context.provider);
+  if (!credential) {
+    return sideQueryError(503, "api_error", "Bailian enhanced web search has no available API key.");
+  }
   let results: BrowserWebSearchProtocolResult[];
   try {
-    results = (await searchBailianEnhancedWeb({
-      apiKey,
-      query: query.trim(),
-      timeoutMs: bailianEnhancedSearchSideQueryTimeoutMs
-    })).slice(0, bailianEnhancedSearchMaxResults);
+    results = (await searchBailianEnhancedWeb({ apiKey: credential.apiKey, query: context.query, signal, timeoutMs: sideQueryTimeoutMs }))
+      .filter((result) => resultMatchesDomains(result, context))
+      .slice(0, maxResults)
+      .map((result) => ({
+        title: result.title.slice(0, 500),
+        url: result.url.slice(0, 2_000),
+        ...(result.snippet ? { snippet: result.snippet.slice(0, 4_000) } : {})
+      }));
   } catch (error) {
-    const message = error instanceof Error ? error.message : "search failed";
-    writeSideQueryError(input.reply, 502, "api_error", `Bailian enhanced web search failed: ${message}`);
-    return;
+    signal?.throwIfAborted();
+    if (error instanceof Error && error.name === "AbortError") {
+      throw error;
+    }
+    const status = bailianEnhancedSearchHttpStatus(error);
+    if (credential.cooldownKey && (status === 401 || status === 403 || status === 429)) {
+      // Search authorization is separate from model access. Do not mark the
+      // provider's normal model credential unhealthy or replay this request.
+      pruneSearchCredentialCooldowns();
+      if (searchCredentialCooldowns.size >= maxSearchCredentialCooldowns) {
+        const oldest = searchCredentialCooldowns.keys().next().value;
+        if (oldest) searchCredentialCooldowns.delete(oldest);
+      }
+      searchCredentialCooldowns.set(credential.cooldownKey, Date.now() + searchCredentialCooldownMs);
+    }
+    return error instanceof Error && error.name === "TimeoutError"
+      ? sideQueryError(504, "api_error", "Bailian enhanced web search timed out.")
+      : sideQueryError(502, "api_error", "Bailian enhanced web search failed.");
   }
-
-  const requestedModel = stringValue(body.model) || provider.models[0] || "web_search";
-  if (body.stream === true) {
-    writeSideQuerySseReply(input.reply, requestedModel, query.trim(), results);
-  } else {
-    input.reply.code(200).send(buildSideQueryMessage(requestedModel, query.trim(), results));
-  }
+  signal?.throwIfAborted();
+  const message = buildSideQueryMessage(context.model, context.query, results);
+  return {
+    statusCode: 200,
+    headers: context.stream
+      ? { "cache-control": "no-cache", "content-type": "text/event-stream; charset=utf-8", "x-accel-buffering": "no" }
+      : { "content-type": "application/json; charset=utf-8" },
+    body: context.stream ? sideQuerySse(message) : JSON.stringify(message)
+  };
 }
 
-/**
- * A WebSearch side query declares exactly one web-search tool (Claude Code
- * sends {type: "web_search_20250305", name: "web_search", ...}).
- */
 export function isBailianEnhancedSearchSideQueryBody(body: Record<string, unknown>): boolean {
-  const tools = body.tools;
-  if (!Array.isArray(tools) || tools.length !== 1) {
+  if (!Array.isArray(body.tools) || body.tools.length !== 1) {
     return false;
   }
-  return isSideQueryWebSearchTool(tools[0]);
-}
-
-function isSideQueryWebSearchTool(tool: unknown): boolean {
-  if (!isRecord(tool)) {
+  const tool = body.tools[0];
+  if (!isRecord(tool) || tool.name !== "web_search" || !/^web_search_\d{8}$/.test(stringValue(tool.type) ?? "")) {
     return false;
   }
-  const type = stringValue(tool.type) ?? "";
-  if (type.startsWith("web_search") || type === "google_search") {
-    return true;
+  if (!Array.isArray(body.messages) || body.messages.length !== 1) {
+    return false;
   }
-  const name = stringValue(tool.name) ?? "";
-  return name === "web_search" || name === "google_search" || name === "web_search_20250305";
+  const text = sideQueryUserText(body);
+  if (!text || !claudeCodeWebSearchQueryPrefix.test(text.trimStart())) {
+    return false;
+  }
+  if (body.tool_choice !== undefined) {
+    const choice = body.tool_choice;
+    if (!isRecord(choice) || !["auto", "any", "tool"].includes(String(choice.type)) ||
+      (choice.type === "tool" && choice.name !== "web_search")) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function sideQueryUserText(body: Record<string, unknown>): string | undefined {
   const messages = Array.isArray(body.messages) ? body.messages : [];
-  const lastMessage = messages.at(-1);
-  if (!isRecord(lastMessage) || stringValue(lastMessage.role) !== "user") {
+  const message = messages[0];
+  if (!isRecord(message) || message.role !== "user") {
     return undefined;
   }
-  const content = lastMessage.content;
-  if (typeof content === "string") {
-    return content;
+  if (typeof message.content === "string") {
+    return message.content;
   }
-  if (!Array.isArray(content)) {
+  if (!Array.isArray(message.content) || message.content.some((part) => !isRecord(part) || part.type !== "text" || typeof part.text !== "string")) {
     return undefined;
   }
-  for (const part of content) {
-    if (isRecord(part) && stringValue(part.type) === "text") {
-      const text = stringValue(part.text);
-      if (text) {
-        return text;
-      }
-    }
-  }
-  return undefined;
+  return message.content.map((part) => part.text).join("\n");
 }
 
 export function stripClaudeCodeWebSearchQueryPrefix(query: string | undefined): string | undefined {
-  return query?.replace(claudeCodeWebSearchQueryPrefix, "");
+  return query?.trimStart().replace(claudeCodeWebSearchQueryPrefix, "");
 }
 
-function bailianEnhancedSearchSideQueryProvider(config: AppConfig): GatewayProviderConfig | undefined {
-  return (config.Providers ?? []).find((provider) =>
-    provider.enabled !== false && provider.enhancedSearch?.enabled === true
-  );
+function searchCredential(provider: GatewayProviderConfig): { apiKey: string; cooldownKey?: string } | undefined {
+  pruneSearchCredentialCooldowns();
+  const dedicated = provider.enhancedSearch?.apiKey?.trim();
+  if (dedicated) {
+    return { apiKey: dedicated };
+  }
+  // An explicit pool never falls back to a disabled, stale or saturated key.
+  if (provider.credentials?.length) {
+    const credentials = sortProviderCredentialsForConfig(activeProviderCredentials(provider));
+    for (const credential of credentials) {
+      const apiKey = providerCredentialApiKey(credential);
+      const cooldownKey = createHash("sha256")
+        .update(JSON.stringify([providerRuntimeId(provider), providerCredentialRuntimeId(provider, credential), apiKey]))
+        .digest("hex");
+      if (!searchCredentialCooldowns.has(cooldownKey) && reserveProviderCredentialUsage(provider, credential, { totalTokens: 0, imageCount: 0 })) {
+        return { apiKey, cooldownKey };
+      }
+    }
+    return undefined;
+  }
+  const apiKey = provider.apikey?.trim() || provider.apiKey?.trim() || provider.api_key?.trim();
+  return apiKey ? { apiKey } : undefined;
 }
 
-function providerApiKey(provider: GatewayProviderConfig): string | undefined {
-  return provider.apikey || provider.apiKey || provider.api_key;
+function pruneSearchCredentialCooldowns(): void {
+  const now = Date.now();
+  for (const [key, until] of searchCredentialCooldowns) {
+    if (until <= now) searchCredentialCooldowns.delete(key);
+  }
 }
 
-function buildSideQueryMessage(model: string, query: string, results: BrowserWebSearchProtocolResult[]): Record<string, unknown> {
-  const summary = sideQueryTextSummary(query, results);
+function parseDomainFilters(value: unknown): DomainFilter[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    throw new Error("Web search domain filters must be arrays of domains without a URL scheme.");
+  }
+  return value.map((entry) => {
+    if (typeof entry !== "string" || !entry || /[^\x21-\x7e]|[?#@\\:]/.test(entry)) {
+      throw new Error("Invalid web search domain filter.");
+    }
+    const slash = entry.indexOf("/");
+    const hostname = (slash < 0 ? entry : entry.slice(0, slash)).toLowerCase().replace(/\.$/, "");
+    if (!hostname.split(".").every((label) => /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label))) {
+      throw new Error("Invalid web search domain filter.");
+    }
+    const path = slash < 0 ? undefined : entry.slice(slash);
+    return {
+      hostname,
+      ...(path ? { path: new RegExp(`^${path.split("*").map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*")}`) } : {})
+    };
+  });
+}
+
+function resultMatchesDomains(result: BrowserWebSearchProtocolResult, context: BailianEnhancedSearchSideQueryContext): boolean {
+  let url: URL;
+  try {
+    url = new URL(result.url);
+  } catch {
+    return false;
+  }
+  if (!["https:", "http:"].includes(url.protocol)) {
+    return false;
+  }
+  const hostname = url.hostname.toLowerCase().replace(/\.$/, "");
+  const matches = (filter: DomainFilter) =>
+    (hostname === filter.hostname || hostname.endsWith(`.${filter.hostname}`)) && (!filter.path || filter.path.test(url.pathname));
+  return (!context.allowedDomains?.length || context.allowedDomains.some(matches)) && !context.blockedDomains?.some(matches);
+}
+
+function buildSideQueryMessage(model: string, query: string, results: BrowserWebSearchProtocolResult[]) {
+  const toolUseId = `srvtoolu_ws_${randomUUID().replaceAll("-", "")}`;
+  const content: Record<string, unknown>[] = [{
+    id: toolUseId, input: { query }, name: "web_search", type: "server_tool_use"
+  }, {
+    content: results.map((result) => ({ type: "web_search_result", title: result.title, url: result.url })),
+    tool_use_id: toolUseId,
+    type: "web_search_tool_result"
+  }, {
+    // This bridge is for isolated Claude Code searches, not Anthropic's opaque
+    // encrypted result continuation protocol. Keep evidence in ordinary text.
+    text: sideQueryTextSummary(query, results),
+    type: "text"
+  }];
   return {
-    content: sideQueryContentBlocks(query, results),
-    id: `msg_ws_${randomUUID()}`,
+    content,
+    id: `msg_ws_${randomUUID().replaceAll("-", "")}`,
     model,
     role: "assistant",
     stop_reason: "end_turn",
     stop_sequence: null,
     type: "message",
-    usage: {
-      input_tokens: 0,
-      output_tokens: Math.trunc(summary.length / bailianEnhancedSearchTokenEstimateDivisor)
-    }
+    usage: { input_tokens: 0, output_tokens: 0, server_tool_use: { web_search_requests: 1 } }
   };
-}
-
-function sideQueryContentBlocks(query: string, results: BrowserWebSearchProtocolResult[]): Record<string, unknown>[] {
-  const toolUseId = `srvtoolu_ws_${randomUUID().slice(0, 16)}`;
-  return [
-    {
-      id: toolUseId,
-      input: { query },
-      name: "web_search",
-      type: "server_tool_use"
-    },
-    {
-      content: results.map((result) => ({
-        type: "web_search_result",
-        title: result.title,
-        url: result.url,
-        ...(result.snippet ? { page_content: result.snippet } : {})
-      })),
-      tool_use_id: toolUseId,
-      type: "web_search_tool_result"
-    },
-    {
-      text: sideQueryTextSummary(query, results),
-      type: "text"
-    }
-  ];
 }
 
 function sideQueryTextSummary(query: string, results: BrowserWebSearchProtocolResult[]): string {
   if (results.length === 0) {
     return `No search results found for: ${query}`;
   }
-  const lines = [`Here are the search results for "${query}":`, ""];
-  results.forEach((result, index) => {
-    lines.push(`${index + 1}. **${result.title}**`);
-    lines.push(`   ${result.url}`);
-    if (result.snippet) {
-      lines.push(`   ${result.snippet}`);
-    }
-    lines.push("");
-  });
-  return lines.join("\n");
+  return [`Here are the search results for "${query}":`, "", ...results.flatMap((result, index) => [
+    `${index + 1}. **${result.title}**`, `   ${result.url}`, ...(result.snippet ? [`   ${result.snippet}`] : []), ""
+  ])].join("\n");
 }
 
-function writeSideQuerySseReply(
-  reply: BailianEnhancedSearchSideQueryReply,
-  model: string,
-  query: string,
-  results: BrowserWebSearchProtocolResult[]
-): void {
-  if (!reply.hijack || !reply.raw) {
-    writeSideQueryError(reply, 500, "api_error", "Streaming web search replies are unavailable on this gateway.");
-    return;
-  }
-  const blocks = sideQueryContentBlocks(query, results);
-  const summary = stringValue(blocks.at(-1)?.text) ?? "";
-  reply.hijack();
-  const raw = reply.raw;
-  raw.writeHead(200, {
-    "cache-control": "no-cache",
-    "connection": "keep-alive",
-    "content-type": "text/event-stream",
-    "x-accel-buffering": "no"
-  });
-  writeSseEvent(raw, "message_start", {
-    message: {
-      content: [],
-      id: `msg_ws_${randomUUID()}`,
-      model,
-      role: "assistant",
-      stop_reason: null,
-      stop_sequence: null,
-      type: "message",
-      usage: { input_tokens: 0, output_tokens: 0 }
-    },
-    type: "message_start"
-  });
-  blocks.forEach((block, index) => {
-    writeSseEvent(raw, "content_block_start", {
-      content_block: block,
-      index,
-      type: "content_block_start"
-    });
+function sideQuerySse(message: ReturnType<typeof buildSideQueryMessage>): string {
+  const events: string[] = [];
+  const push = (type: string, data: Record<string, unknown>) => events.push(`event: ${type}\ndata: ${JSON.stringify({ ...data, type })}\n\n`);
+  push("message_start", { message: { ...message, content: [], stop_reason: null, usage: { input_tokens: 0, output_tokens: 0 } } });
+  message.content.forEach((block, index) => {
+    const start = block.type === "text" ? { ...block, text: "" }
+      : block.type === "server_tool_use" ? { ...block, input: {} } : block;
+    push("content_block_start", { content_block: start, index });
     if (block.type === "text") {
-      writeSseEvent(raw, "content_block_delta", {
-        delta: { text: stringValue(block.text) ?? "", type: "text_delta" },
-        index,
-        type: "content_block_delta"
-      });
+      push("content_block_delta", { delta: { text: block.text, type: "text_delta" }, index });
+    } else if (block.type === "server_tool_use") {
+      push("content_block_delta", { delta: { partial_json: JSON.stringify(block.input), type: "input_json_delta" }, index });
     }
-    writeSseEvent(raw, "content_block_stop", {
-      index,
-      type: "content_block_stop"
-    });
+    push("content_block_stop", { index });
   });
-  writeSseEvent(raw, "message_delta", {
-    delta: { stop_reason: "end_turn", stop_sequence: null },
-    type: "message_delta",
-    usage: {
-      output_tokens: Math.trunc(summary.length / bailianEnhancedSearchTokenEstimateDivisor)
-    }
-  });
-  writeSseEvent(raw, "message_stop", { type: "message_stop" });
-  raw.end();
+  push("message_delta", { delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 0, server_tool_use: { web_search_requests: 1 } } });
+  push("message_stop", {});
+  return events.join("");
 }
 
-function writeSseEvent(raw: ServerResponse, event: string, data: Record<string, unknown>): void {
-  raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-}
-
-function writeSideQueryError(
-  reply: BailianEnhancedSearchSideQueryReply,
-  status: number,
-  type: string,
-  message: string
-): void {
-  reply.code(status).send({
-    error: { message, type },
-    type: "error"
-  });
+function sideQueryError(statusCode: number, type: string, message: string): BailianEnhancedSearchSideQueryResponse {
+  return { statusCode, headers: { "content-type": "application/json; charset=utf-8" }, body: JSON.stringify({ error: { message, type }, type: "error" }), error: message };
 }

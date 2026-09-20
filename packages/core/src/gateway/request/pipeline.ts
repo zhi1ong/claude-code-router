@@ -37,6 +37,7 @@ import {
   shouldRewriteAnthropicMessageModelJson,
   shouldRewriteAnthropicMessageStartModel
 } from "@ccr/core/gateway/features/anthropic-response-model";
+import { executeBailianEnhancedSearchSideQuery, prepareBailianEnhancedSearchSideQuery } from "@ccr/core/gateway/features/bailian-enhanced-search";
 import { prepareCursorOpenAICompatChatBody } from "@ccr/core/gateway/features/cursor-compat";
 import { filteredResponseHeaders, formatError, formatUpstreamErrorForLog, forwardHeaders, inferGatewayClient, readRequestBody, sendJson, shouldCaptureGatewayUsage, shouldSendBody, stripLocalGatewayAuthHeaders } from "@ccr/core/gateway/http/io";
 import { appendAggregateErrorAttemptSummary, shouldBufferAggregateErrorBody } from "@ccr/core/gateway/http/error-detail";
@@ -52,7 +53,7 @@ import { clientClosedRequestStatusCode, clientDisconnectMessage, coreGatewayAuth
 import type { BrowserWebSearchMcpIntegration, BrowserWebSearchProtocolRecord, UpstreamFetchResult } from "@ccr/core/gateway/internal/shared";
 import { cancelResponseBody, destroyResponseStreams, fetchUpstreamWithFallback, mergeFallbackResponseHeaders, rewriteCapabilityResponseHeaders, uniqueStreams, upstreamResponseHeaders } from "@ccr/core/gateway/upstream/executor";
 import { requestProtocolForPath, shouldApplyGatewayRouting } from "@ccr/core/routing/protocol-endpoints";
-import { modelRegistryForConfig } from "@ccr/core/routing/model-registry";
+import { modelRegistryForConfig, providerRuntimeId } from "@ccr/core/routing/model-registry";
 import { createClaudeCodeWebSearchContinuationContext, createHostedWebSearchProtocolContext, hostedWebSearchProtocolResponseStream, hostedWebSearchUnavailableMessage, prepareClaudeCodeWebSearchContinuationRequestBody, prepareHostedWebSearchProtocolRequestBody, selectClaudeCodeWebSearchContinuationRecords, selectHostedWebSearchProtocolRecords } from "@ccr/core/gateway/features/hosted-web-search/index";
 import { isModelAllowedForProfile, profileForApiKey } from "@ccr/core/profiles/model-allowlist";
 import { pluginService } from "@ccr/core/plugins/service";
@@ -466,6 +467,48 @@ export class GatewayRequestPipeline {
         return;
       }
       if (!reserveApiKeyLimits(apiKey, request, response, bodyToForward)) {
+        return;
+      }
+
+      const enhancedSearch = prepareBailianEnhancedSearchSideQuery({
+        config: activeConfig,
+        method,
+        path,
+        body: bodyToForward,
+        requestedModel,
+        routedModel: effectiveModel
+      });
+      if (enhancedSearch) {
+        const searchStartedAt = Date.now();
+        const responseHeaders = new Headers({
+          "x-gateway-target-provider": providerRuntimeId(enhancedSearch.provider)
+        });
+        try {
+          const result = await executeBailianEnhancedSearchSideQuery(enhancedSearch, upstreamAbortController.signal);
+          for (const [name, value] of Object.entries(result.headers)) {
+            responseHeaders.set(name, value);
+          }
+          routeTrace?.capture({
+            durationMs: Date.now() - searchStartedAt,
+            kind: "decision",
+            name: "enrichment.bailian-enhanced-search",
+            phase: "enrichment",
+            startedAtMs: searchStartedAt,
+            target: { model: effectiveModel, provider: enhancedSearch.provider.name }
+          });
+          if (clientDisconnected || response.destroyed) {
+            writeRequestLog(clientClosedRequestStatusCode, responseHeaders, "", false, clientDisconnectMessage);
+            return;
+          }
+          writeRequestLog(result.statusCode, responseHeaders, result.body, false, result.error);
+          response.writeHead(result.statusCode, Object.fromEntries(filteredResponseHeaders(responseHeaders)));
+          response.end(result.body);
+        } catch (error) {
+          if (!clientDisconnected && !upstreamAbortController.signal.aborted) {
+            throw error;
+          }
+          writeRequestLog(clientClosedRequestStatusCode, responseHeaders, "", false, clientDisconnectMessage);
+        }
         return;
       }
 

@@ -5,7 +5,6 @@ export const ccrRouterRequestTransformKey = "ccr-router-request-transform";
 export const ccrCodexBridgeRequestTransformKey = "ccr-codex-bridge-request-transform";
 export const ccrCodexBridgeResponseHookKey = "ccr-codex-bridge-response-hook";
 export const ccrCodexBridgeStreamHookKey = "ccr-codex-bridge-stream-hook";
-export const ccrBailianEnhancedSearchRouteKey = "ccr-bailian-enhanced-search-route";
 export const ccrOpenRouterDiscountFinalizeResponseHookKey = "ccr-openrouter-discount-finalize-response-hook";
 export const ccrOpenRouterDiscountFinalizeStreamHookKey = "ccr-openrouter-discount-finalize-stream-hook";
 export const ccrRouterRouteResolverKey = "ccr-router-route-resolver";
