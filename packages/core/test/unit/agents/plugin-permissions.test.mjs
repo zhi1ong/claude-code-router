@@ -6,6 +6,7 @@ import test from "node:test";
 import { createDefaultAppConfig } from "@ccr/core/config/default-config.ts";
 import { pluginService } from "@ccr/core/plugins/service.ts";
 import { CCR_DESKTOP_APP_ENV } from "@ccr/core/runtime/desktop-app.ts";
+import { mockDesktopRuntime } from "../../support/desktop-runtime.mjs";
 
 test("plugin permissions gate dynamic gateway route registration", { skip: !process.env.CCR_INTERNAL_HOME_DIR }, async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "ccr-plugin-permissions-"));
@@ -100,7 +101,8 @@ test("plugin permissions gate configured browser apps", { skip: !process.env.CCR
   }
 });
 
-test("known bundled plugins without persisted permissions receive scoped defaults", { skip: !process.env.CCR_INTERNAL_HOME_DIR }, async () => {
+test("known bundled plugins without persisted permissions receive scoped defaults", { skip: !process.env.CCR_INTERNAL_HOME_DIR }, async (t) => {
+  mockDesktopRuntime(t);
   const dir = mkdtempSync(path.join(os.tmpdir(), "ccr-plugin-known-defaults-"));
   try {
     const pluginFile = path.join(dir, "claude-design-plugin.cjs");
