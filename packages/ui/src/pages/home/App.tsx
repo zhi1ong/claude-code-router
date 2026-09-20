@@ -3386,7 +3386,8 @@ function App() {
               error: apiKeyError,
               onChange: updateApiKeyDraft,
               onClose: () => setApiKeyAddOpen(false),
-              onSubmit: submitApiKeyDraft
+              onSubmit: submitApiKeyDraft,
+              profiles: draftConfig.profile.enabled ? draftConfig.profile.profiles : []
             } : undefined}
             apiKeyCreated={createdApiKey ? {
               apiKeyName: createdApiKey.name?.trim() || t("API key"),
