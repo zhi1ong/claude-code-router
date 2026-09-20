@@ -361,14 +361,21 @@ export async function createGatewayPlugin(input: GatewayPluginFactoryInput = {})
       // enhanced search option. Runs in the pre-handler phase before the
       // engine's messages handler; returning without replying lets every
       // other request (including all main conversation traffic) through
-      // untouched.
-      auth: "gateway",
+      // untouched. Auth is "none" so the engine's own auth chain stays the
+      // only one for declined requests; side queries validate the key inside
+      // the handler.
+      auth: "none",
       key: ccrBailianEnhancedSearchRouteKey,
       method: "POST",
       path: "/v1/messages",
       priority: "pre",
       handler: async ({ request, reply }: { request: GatewayPluginHttpRequest; reply: GatewayPluginHttpReply }) => {
-        await handleBailianEnhancedSearchSideQuery({ config, request, reply });
+        await handleBailianEnhancedSearchSideQuery({
+          config,
+          request,
+          reply,
+          validateApiKey: async (headers) => Boolean(await resolveApiKey(config, headers))
+        });
         return undefined;
       }
     }],

@@ -12,6 +12,7 @@ const bailianEnhancedSearchTokenEstimateDivisor = 4;
 
 type SideQueryRequest = {
   body?: unknown;
+  headers?: Record<string, string | string[] | undefined>;
 };
 
 export type BailianEnhancedSearchSideQueryReply = {
@@ -36,6 +37,7 @@ export async function handleBailianEnhancedSearchSideQuery(input: {
   config: AppConfig;
   request: SideQueryRequest;
   reply: BailianEnhancedSearchSideQueryReply;
+  validateApiKey?: (headers: Record<string, string | string[] | undefined>) => Promise<boolean>;
 }): Promise<void> {
   const body = isRecord(input.request.body) ? input.request.body : undefined;
   if (!body || !isBailianEnhancedSearchSideQueryBody(body)) {
@@ -43,6 +45,12 @@ export async function handleBailianEnhancedSearchSideQuery(input: {
   }
   const provider = bailianEnhancedSearchSideQueryProvider(input.config);
   if (!provider) {
+    return;
+  }
+  // The route registers with auth "none" so that non-side-query traffic never
+  // touches the plugin auth chain before the engine handles it; side queries
+  // validate the API key here instead and fall through when it is invalid.
+  if (input.validateApiKey && !await input.validateApiKey(input.request.headers ?? {})) {
     return;
   }
   const query = stripClaudeCodeWebSearchQueryPrefix(sideQueryUserText(body));

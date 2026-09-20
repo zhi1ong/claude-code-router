@@ -67,6 +67,7 @@ function sideQueryRequestBody(query, options = {}) {
 
 function enabledProviderConfig() {
   const config = createDefaultAppConfig();
+  config.APIKEYS = [{ key: "test-gateway-key", name: "Test key" }];
   config.Providers = [{
     enhancedSearch: { apiKey: "sk-ws-test", enabled: true },
     id: "bailian",
@@ -173,10 +174,10 @@ test("CCR router core plugin answers web search side queries with an Anthropic m
     assert.equal(route.method, "POST");
     assert.equal(route.path, "/v1/messages");
     assert.equal(route.priority, "pre");
-    assert.equal(route.auth, "gateway");
+    assert.equal(route.auth, "none");
 
     const { reply, state } = mockReply();
-    await route.handler({ request: { body: sideQueryRequestBody("上海天气") }, reply });
+    await route.handler({ request: { body: sideQueryRequestBody("上海天气"), headers: { authorization: "Bearer test-gateway-key" } }, reply });
 
     assert.equal(state.sent, true);
     assert.equal(state.code, 200);
@@ -215,7 +216,7 @@ test("side query route streams the search reply as Anthropic SSE", withLoopbackE
     const plugin = await createGatewayPlugin({ plugin: { config: { appConfig: enabledProviderConfig() } } });
     const route = plugin.httpRoutes.find((item) => item.key === ccrBailianEnhancedSearchRouteKey);
     const { chunks, reply, state } = mockReply();
-    await route.handler({ request: { body: sideQueryRequestBody("杭州天气", { stream: true }) }, reply });
+    await route.handler({ request: { body: sideQueryRequestBody("杭州天气", { stream: true }), headers: { authorization: "Bearer test-gateway-key" } }, reply });
 
     assert.equal(state.hijacked, true);
     assert.equal(state.code, 200);
@@ -285,7 +286,7 @@ test("side query route reports search failures as Anthropic API errors", withLoo
     const plugin = await createGatewayPlugin({ plugin: { config: { appConfig: enabledProviderConfig() } } });
     const route = plugin.httpRoutes.find((item) => item.key === ccrBailianEnhancedSearchRouteKey);
     const { reply, state } = mockReply();
-    await route.handler({ request: { body: sideQueryRequestBody("上海天气") }, reply });
+    await route.handler({ request: { body: sideQueryRequestBody("上海天气"), headers: { authorization: "Bearer test-gateway-key" } }, reply });
 
     assert.equal(state.sent, true);
     assert.equal(state.code, 502);
