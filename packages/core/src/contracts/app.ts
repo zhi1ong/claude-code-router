@@ -2222,6 +2222,8 @@ export type RequestLogEntry = {
   cacheReadTokens: number;
   cacheWriteTokens: number;
   client: string;
+  clientApiKeyId?: string;
+  clientApiKeyName?: string;
   completedAt?: string;
   costUsd?: number;
   createdAt: string;

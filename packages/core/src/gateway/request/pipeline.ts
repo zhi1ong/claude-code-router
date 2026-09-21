@@ -310,6 +310,8 @@ export class GatewayRequestPipeline {
           bodyCapturePolicy: bodyCapture,
           captureBody,
           client,
+          clientApiKeyId: apiKey?.id,
+          clientApiKeyName: apiKey?.name,
           completedAt: new Date().toISOString(),
           durationMs: Date.now() - startedAt,
           error,
