@@ -283,7 +283,12 @@ export class GatewayRequestPipeline {
       const modelBeforeRouting = requestLogRequestedModel(bodyToForward ?? requestBody, path);
       const usageAttributionConfig = coreGatewayUsageAttributionConfig(this.config);
       const recordUsage = (input: Omit<UsageCaptureInput, "config">) => {
-        void recordGatewayUsageCapture({ ...input, config: usageAttributionConfig });
+        void recordGatewayUsageCapture({
+          ...input,
+          clientApiKeyId: apiKey?.id,
+          clientApiKeyName: apiKey?.name,
+          config: usageAttributionConfig
+        });
       };
       const upstreamAbortController = new AbortController();
       let clientDisconnected = false;

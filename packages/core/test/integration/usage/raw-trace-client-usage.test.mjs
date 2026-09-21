@@ -5,6 +5,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
 import { createDefaultAppConfig } from "@ccr/core/config/default-config.ts";
+import { ccrClientIdentityHeader } from "@ccr/core/gateway/core-runtime/router-plugin-contract.ts";
 import { rawTraceSyncHeader } from "@ccr/core/gateway/internal/shared.ts";
 import { RawTraceSynchronizer } from "@ccr/core/observability/raw-trace-sync.ts";
 import { UsageStore, usageStore } from "@ccr/core/usage/store.ts";
@@ -24,9 +25,12 @@ test("raw trace usage retains client attribution and only missing identities sta
   });
 
   try {
+    const identityHeader = {
+      [ccrClientIdentityHeader]: Buffer.from(JSON.stringify({ id: "key-a", name: "Mac mini" })).toString("base64url")
+    };
     for (const [requestId, headers] of [
-      ["explicit-client", { "x-ccr-client": "Mac mini", "user-agent": "codex-cli/1.0" }],
-      ["inferred-client", { "user-agent": "codex-cli/1.0" }],
+      ["explicit-client", { ...identityHeader, "x-ccr-client": "Mac mini", "user-agent": "codex-cli/1.0" }],
+      ["inferred-client", { ...identityHeader, "user-agent": "codex-cli/1.0" }],
       ["missing-client", {}]
     ]) {
       await deliverBundle(synchronizer, dir, requestId, requestId, headers);
@@ -42,6 +46,12 @@ test("raw trace usage retains client attribution and only missing identities sta
       stats.clientModels.map((row) => [row.client, row.requestCount, row.totalTokens]).sort(),
       [["Codex", 1, 15], ["Mac mini", 1, 15], ["unknown", 1, 15]]
     );
+    assert.equal(stats.clients.length, 2);
+    assert.equal(stats.clients[0].clientApiKeyId, "key-a");
+    assert.equal(stats.clients[0].label, "Mac mini");
+    assert.equal(stats.clients[0].totalTokens, 30);
+    assert.equal(stats.clients[0].requestCount, 2);
+    assert.equal(stats.clients[1].clientApiKeyId, undefined);
   } finally {
     await synchronizer.stop();
     rmSync(dir, { force: true, recursive: true });

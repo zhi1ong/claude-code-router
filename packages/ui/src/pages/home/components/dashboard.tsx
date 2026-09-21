@@ -1274,7 +1274,7 @@ function OverviewWidgetRenderer({
   } else if (widget.type === "model-distribution") {
     content = <ModelDistributionOverviewWidget dimensions={dimensions} rows={usageStats.models} variant={overviewTokenMixVariant(widget.variant)} />;
   } else if (widget.type === "client-analysis") {
-    content = <OverviewAnalysisWidget dimensions={dimensions} kind="client" rows={usageStats.clientModels} variant={widget.variant === "compact" ? "compact" : "table"} />;
+    content = <OverviewAnalysisWidget dimensions={dimensions} kind="client" rows={usageStats.clients ?? []} variant={widget.variant === "compact" ? "compact" : "table"} />;
   } else if (isShareOverviewWidgetType(widget.type)) {
     content = <ShareCardWidget providerAccounts={providerAccounts} type={widget.type} usageRange={usageRange} usageStats={usageStats} />;
   } else {
@@ -1935,10 +1935,7 @@ function OverviewAnalysisWidget({
   const emptyLabel = kind === "client" ? t("No client usage yet") : t("No provider usage yet");
   const columns: UsageAnalysisColumn[] = kind === "client"
     ? [
-      { key: "client", label: t("Client") },
-      { key: "model", label: t("Model") },
-      { key: "provider", label: t("Provider") },
-      { key: "credentialId", label: t("Credential") }
+      { key: "client", label: t("Client API key") }
     ]
     : [
       { key: "provider", label: t("Provider") },
@@ -1960,10 +1957,10 @@ function OverviewAnalysisWidget({
               {rows.map((row) => (
                 <div className="overview-nested-surface flex min-w-0 items-center justify-between gap-3 border px-3 py-2" key={row.key}>
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-[12px] font-medium" title={kind === "client" ? overviewClientLabel(row.label, t) : row.label}>
-                      {kind === "client" ? overviewClientLabel(row.label, t) : row.label}
+                    <div className="truncate text-[12px] font-medium" title={kind === "client" ? overviewClientLabel(row, t) : row.label}>
+                      {kind === "client" ? overviewClientLabel(row, t) : row.label}
                     </div>
-                    <div className="truncate text-[11px] text-muted-foreground" title={row.caption}>{row.caption}</div>
+                    {row.caption ? <div className="truncate text-[11px] text-muted-foreground" title={row.caption}>{kind === "client" ? compactId(row.caption) : row.caption}</div> : null}
                   </div>
                   <span className="shrink-0 text-[12px] font-semibold" title={`${t("Total tokens")}: ${row.totalTokens.toLocaleString()}`}>
                     {formatCompactNumber(row.totalTokens)} <span className="text-[10px] font-normal text-muted-foreground">{t("Token")}</span>
@@ -1985,9 +1982,8 @@ function OverviewAnalysisGroupCount({ count }: { count: number }) {
   return <Badge variant="outline">{count} {t(count === 1 ? "group" : "groups")}</Badge>;
 }
 
-function overviewClientLabel(value: string | undefined, translate: (value: string) => string): string {
-  const label = value?.trim();
-  return !label || label.toLowerCase() === "unknown" ? translate("Unidentified client") : label;
+function overviewClientLabel(row: UsageComparisonRow, translate: (value: string) => string): string {
+  return row.clientApiKeyId ? row.client || row.label || row.clientApiKeyId : translate("Unidentified API key");
 }
 
 function overviewWidgetTemplates(): OverviewWidgetConfig[] {
@@ -6323,11 +6319,11 @@ function UsageAnalysisCard({
                 {rows.map((row) => (
                   <tr className={agentListRowClassName()} key={row.key}>
                     {visibleColumns.map((column) => {
-                      const value = column.key === "client" ? overviewClientLabel(row.client ?? row.label, t) : row[column.key] || "-";
+                      const value = column.key === "client" ? overviewClientLabel(row, t) : row[column.key] || "-";
                       return (
                         <td className="max-w-[180px] px-3 py-2 font-medium" key={column.key}>
                           <span className="block truncate" title={value}>{value}</span>
-                          {visibleColumns.length === 1 ? <span className="block truncate text-[11px] font-normal text-muted-foreground" title={row.caption}>{row.caption}</span> : null}
+                          {visibleColumns.length === 1 && row.caption ? <span className="block truncate text-[11px] font-normal text-muted-foreground" title={row.caption}>{column.key === "client" ? compactId(row.caption) : row.caption}</span> : null}
                         </td>
                       );
                     })}

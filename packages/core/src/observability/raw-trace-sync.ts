@@ -1524,6 +1524,8 @@ async function recordUsageCaptureFromRawTrace(
   await recordGatewayUsageCaptureIfMissing({
     bodyText: await rawTraceUsageBodyText(input, files.responseBody),
     client: input.client,
+    clientApiKeyId: input.clientApiKeyId,
+    clientApiKeyName: input.clientApiKeyName,
     config,
     durationMs: numberValue(input.durationMs) ?? 0,
     fallbackModel: input.model,
