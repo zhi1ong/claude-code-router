@@ -21,9 +21,10 @@ import { rawTraceMaxPartBytes, resolveRawTraceBodyLimit } from "@ccr/core/observ
 import { isRecord, numberValue, stringValue } from "@ccr/core/gateway/internal/value";
 import { formatError, inferGatewayClient, parseJsonObject, readHeader, readRequestBody, sendJson, shouldCaptureGatewayUsage } from "@ccr/core/gateway/http/io";
 import { endpoint } from "@ccr/core/gateway/core-runtime/supervisor";
-import { ccrClientIdentityHeader } from "@ccr/core/gateway/core-runtime/router-plugin-contract";
+import { ccrClientIdentityHeader, ccrClientVisibleModelHeader } from "@ccr/core/gateway/core-runtime/router-plugin-contract";
 import { maxUsageCaptureBytes, rawTraceSyncHeader, rawTraceSyncPath } from "@ccr/core/gateway/internal/shared";
 import type { RawTracePartText } from "@ccr/core/gateway/internal/shared";
+import { requestLogRequestedModel, requestLogResponseModel } from "@ccr/core/observability/request-log-model";
 import { resolveResponseProviderProtocol } from "@ccr/core/providers/runtime-topology";
 import { recordGatewayUsageCaptureIfMissing } from "@ccr/core/usage/store";
 
@@ -54,6 +55,7 @@ type RawTraceSynchronizerDependencies = {
 };
 
 type RawTraceRequestLogBundle = {
+  clientVisibleModel?: string;
   files: RequestLogRawTraceFiles;
   update: RequestLogRawTraceUpdateInput;
 };
@@ -391,7 +393,7 @@ export class RawTraceSynchronizer {
         this.retryStates.delete(stored.bundleId);
         return true;
       }
-      await recordUsageCaptureFromRawTrace(config, bundle.update, bundle.files);
+      await recordUsageCaptureFromRawTrace(config, bundle.update, bundle.files, bundle.clientVisibleModel);
       if (!shouldRecordRequestLogs(config)) {
         await this.cleanupStoredBundle(stored);
         this.retryStates.delete(stored.bundleId);
@@ -1511,7 +1513,8 @@ export function rawTraceRequestOutcome(
 async function recordUsageCaptureFromRawTrace(
   config: AppConfig,
   input: RequestLogRawTraceUpdateInput,
-  files: RequestLogRawTraceFiles
+  files: RequestLogRawTraceFiles,
+  clientVisibleModel?: string
 ): Promise<void> {
   const method = input.method ?? "POST";
   const path = input.path ?? pathFromUrl(input.url) ?? "/";
@@ -1520,8 +1523,14 @@ async function recordUsageCaptureFromRawTrace(
   }
 
   const responseHeaders = headersFromRawTrace(input.responseHeaders);
+  const bodyText = await rawTraceUsageBodyText(input, files.responseBody);
+  // Only override a confirmed client-facing rewrite. Ordinary upstream aliases
+  // such as "auto" must still be attributed to the model returned upstream.
+  const upstreamModel = clientVisibleModel && requestLogResponseModel(bodyText) === clientVisibleModel
+    ? await readRawTraceRequestModel(files.requestBody, input.url)
+    : undefined;
   await recordGatewayUsageCaptureIfMissing({
-    bodyText: await rawTraceUsageBodyText(input, files.responseBody),
+    bodyText,
     client: input.client,
     clientApiKeyId: input.clientApiKeyId,
     clientApiKeyName: input.clientApiKeyName,
@@ -1534,7 +1543,8 @@ async function recordUsageCaptureFromRawTrace(
     providerProtocol: resolveResponseProviderProtocol(responseHeaders, config),
     requestId: input.requestId,
     responseHeaders,
-    statusCode: numberValue(input.statusCode) ?? 0
+    statusCode: numberValue(input.statusCode) ?? 0,
+    upstreamModel
   });
 }
 
@@ -1644,6 +1654,7 @@ export async function readRawTraceRequestLogBundle(
   ));
 
   return {
+    clientVisibleModel: stringValue(readUnknownHeader(clientRequestHeaders, ccrClientVisibleModelHeader)),
     files: {
       cleanupDirectory: rawTraceBundleDirectory(parts, spoolDirectory),
       requestBody: upstreamRequestBody,
@@ -1693,6 +1704,23 @@ function readRawTraceClientIdentity(
     } : {};
   } catch {
     return {};
+  }
+}
+
+async function readRawTraceRequestModel(
+  part: RequestLogRawTraceFile | undefined,
+  url: string | undefined
+): Promise<string | undefined> {
+  const path = pathFromUrl(url);
+  // Raw bodies may be arbitrarily large; extracting a summary must not load
+  // an unbounded sidecar into memory. Missing client models stay unknown.
+  if (!part || part.truncated || part.sizeBytes > maxUsageCaptureBytes) {
+    return requestLogRequestedModel("", path);
+  }
+  try {
+    return requestLogRequestedModel(await readFile(part.filePath, "utf8"), path);
+  } catch {
+    return requestLogRequestedModel("", path);
   }
 }
 
