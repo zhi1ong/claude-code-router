@@ -72,6 +72,8 @@ export type UsageCaptureInput = {
   requestId?: string;
   responseHeaders: Headers;
   statusCode: number;
+  /** Physical model from the upstream request, before client-facing rewrites. */
+  upstreamModel?: string;
 };
 
 type UsageStatsQueryOptions = {
@@ -254,7 +256,8 @@ export class UsageStore {
       responseAttribution.provider ??
       fallbackAttribution.provider ??
       route.provider;
-    const model = responseAttribution.model ?? fallbackAttribution.model ?? route.model ?? input.fallbackModel;
+    const upstreamModel = normalizeFilterValue(input.upstreamModel);
+    const model = upstreamModel ?? responseAttribution.model ?? fallbackAttribution.model ?? route.model ?? input.fallbackModel;
 
     await this.record({
       durationMs: input.durationMs,
@@ -272,7 +275,7 @@ export class UsageStore {
       pricing: providerModelPricingForUsage(
         input.config,
         provider,
-        fallbackAttribution.model ?? input.fallbackModel ?? model
+        upstreamModel ?? fallbackAttribution.model ?? input.fallbackModel ?? model
       ),
       credentialId: readCredentialId(input.responseHeaders),
       requestId: input.requestId,

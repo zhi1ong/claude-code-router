@@ -1112,6 +1112,12 @@ export class GatewayRequestPipeline {
           ? rewriteAnthropicMessageModelJsonStream(responseBody, clientVisibleResponseModel)
           : responseBody;
       const sampler = createBodySampler();
+      // Keep accounting on the response before client-facing model rewrites.
+      // Reuse the log sample when the response passes through unchanged.
+      const usageSampler = shouldCaptureUsage && clientResponseBody !== responseBody ? createBodySampler() : sampler;
+      if (usageSampler !== sampler) {
+        responseBody.on("data", (chunk) => usageSampler.append(chunk));
+      }
       const sseErrorDetector = createSseErrorDetector(responseHeaders.get("content-type") ?? undefined);
       let streamDetectedError: string | undefined;
       const clientExperienceMeter = createStreamExperienceMeter({
@@ -1215,7 +1221,7 @@ export class GatewayRequestPipeline {
       if (shouldCaptureUsage) {
         meteredClientResponseBody.once("end", () => {
           recordUsage({
-            bodyText: sampler.read(),
+            bodyText: usageSampler.read(),
             client,
             durationMs: Date.now() - startedAt,
             fallbackModel: routedModel,
