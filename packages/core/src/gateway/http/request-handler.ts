@@ -7,6 +7,7 @@ import { BROWSER_AUTOMATION_MCP_PATH, browserAutomationMcpEnabled } from "@ccr/c
 import { pluginService } from "@ccr/core/plugins/service";
 import { ClaudeCodeRouterPlugin } from "@ccr/core/gateway/claude-code-router-plugin";
 import { createClaudeCliBootstrapResponse, shouldServeClaudeCliBootstrapResponse } from "@ccr/core/gateway/features/model-discovery";
+import { forwardBailianCountTokens } from "@ccr/core/gateway/features/bailian-count-tokens";
 import {
   contextArchiveConfigForApiKey,
   handleContextArchiveMcpRequest,
@@ -278,6 +279,21 @@ export class GatewayHttpRequestHandler {
           return;
         }
         if (!reserveApiKeyLimits(authorization.apiKey, request, response, requestBody)) {
+          return;
+        }
+        const upstream = await forwardBailianCountTokens({
+          apiKey: authorization.apiKey,
+          body,
+          config: this.config,
+          headers: request.headers,
+          request,
+          response,
+          router: this.plugin
+        });
+        if (response.destroyed) return;
+        if (upstream) {
+          response.writeHead(upstream.statusCode, upstream.headers);
+          response.end(upstream.body);
           return;
         }
         sendJson(response, 200, this.plugin.countTokens(body));
