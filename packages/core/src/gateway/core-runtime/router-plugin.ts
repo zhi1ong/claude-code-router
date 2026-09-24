@@ -18,6 +18,9 @@ import {
   ccrCodexBridgeResponseHookKey,
   ccrCodexBridgeStreamHookKey,
   ccrCodexMultiAgentBridgeHeader,
+  ccrClientVisibleModelHeader,
+  ccrClientVisibleModelResponseHookKey,
+  ccrClientVisibleModelStreamHookKey,
   ccrLiveTokenRateConfigMessageType,
   ccrLiveTokenRateSnapshotMessageType,
   ccrLiveTokenRateStreamHookKey,
@@ -49,6 +52,11 @@ import {
   createGatewayModelsResponse,
   resolveGatewayPublicModelId
 } from "@ccr/core/gateway/features/model-discovery";
+import {
+  isClaudeDefaultModelListEnabled,
+  resolveClaudeDefaultTierTarget
+} from "@ccr/core/gateway/features/claude-default-models";
+import { rewriteAnthropicMessageModelPayload, rewriteAnthropicMessageStartModelStream } from "@ccr/core/gateway/features/anthropic-response-model";
 import {
   codexApplyPatchBridgeResponseStream,
   prepareCodexApplyPatchBridgeRequest,
@@ -174,6 +182,7 @@ type GatewayStreamHookInput = {
     method?: string;
     url?: string;
   };
+  sourceAdapterKey?: string;
   targetProvider?: string;
   targetProviderConfig?: Pick<GatewayProviderConfig, "provider" | "type">;
   upstreamRequest?: UpstreamRequest;
@@ -349,7 +358,10 @@ export async function createGatewayPlugin(input: GatewayPluginFactoryInput = {})
         if (requestedModel && !isModelAllowedForProfile(config, profile, requestedModel)) {
           return reply.code(403).send(profileModelNotAllowedError(requestedModel));
         }
-        return router.countTokens(body);
+        const countTokensTarget = isClaudeDefaultModelListEnabled(profile)
+          ? resolveClaudeDefaultTierTarget(profile, requestedModel)
+          : undefined;
+        return router.countTokens(countTokensTarget ? { ...body, model: countTokensTarget } : body);
       }
     }],
     requestHooks: [{
@@ -395,8 +407,24 @@ export async function createGatewayPlugin(input: GatewayPluginFactoryInput = {})
         const apiKey = await resolveApiKey(config, requestInput.request?.headers);
         const profile = profileForApiKey(config, apiKey);
         const modelBeforeRouting = requestedModelFromBody(requestInput.requestBody, path, requestInput.model);
+        // Default model list: rewrite tier model names to the profile slot
+        // targets before routing so they resolve on every protocol endpoint.
+        // The original client model is kept on the request so the response
+        // stream hook can rewrite message_start.model back to it.
+        const tierTarget = isClaudeDefaultModelListEnabled(profile)
+          ? resolveClaudeDefaultTierTarget(profile, modelBeforeRouting)
+          : undefined;
+        const tierRewriteApplied = Boolean(
+          tierTarget && tierTarget.toLowerCase() !== String(modelBeforeRouting ?? "").toLowerCase()
+        );
+        if (tierRewriteApplied && requestInput.request?.headers) {
+          requestInput.request.headers[ccrClientVisibleModelHeader] = String(modelBeforeRouting ?? tierTarget);
+        }
+        const routingBody = tierRewriteApplied
+          ? { ...requestInput.requestBody, model: tierTarget }
+          : requestInput.requestBody;
         const routeResponse = await routeWithRouter(router, {
-          body: requestInput.requestBody,
+          body: routingBody,
           headers: requestInput.request?.headers,
           method,
           path,
@@ -448,6 +476,10 @@ export async function createGatewayPlugin(input: GatewayPluginFactoryInput = {})
       transformResponse: (responseInput: GatewayResponseHookInput) =>
         applyCodexBridgeResponseTransform(responseInput)
     }, {
+      key: ccrClientVisibleModelResponseHookKey,
+      transformResponse: (responseInput: GatewayResponseHookInput) =>
+        applyClientVisibleModelResponseTransform(responseInput)
+    }, {
       key: ccrOpenRouterDiscountFinalizeResponseHookKey,
       transformResponse: (responseInput: GatewayResponseHookInput) => {
         finalizeOpenRouterDiscountSelection(responseInput);
@@ -468,6 +500,10 @@ export async function createGatewayPlugin(input: GatewayPluginFactoryInput = {})
       key: ccrLiveTokenRateStreamHookKey,
       transformResponse: (streamInput: GatewayStreamHookInput) =>
         applyLiveTokenRateStreamTransform(streamInput, liveTokenRatePublisher)
+    }, {
+      key: ccrClientVisibleModelStreamHookKey,
+      transformResponse: (streamInput: GatewayStreamHookInput) =>
+        applyClientVisibleModelStreamTransform(streamInput)
     }],
     routeResolvers: [{
       key: ccrRouterRouteResolverKey,
@@ -825,6 +861,48 @@ function codexBridgeState(input: {
     multiAgent: hasTruthyHeader(input.request?.headers, ccrCodexMultiAgentBridgeHeader) ||
       hasTruthyHeader(input.upstreamRequest?.headers, ccrCodexMultiAgentBridgeHeader)
   };
+}
+
+// Default model list: rewrite message_start.model back to the client-requested
+// tier name the routing transform stashed on the request. The pipeline-based
+// runtime rewrites the model itself; these hooks cover the single-runtime
+// topology where responses pass through the engine untouched.
+function applyClientVisibleModelStreamTransform(streamInput: GatewayStreamHookInput): Response | undefined {
+  const clientModel = readHeader(streamInput.request?.headers, ccrClientVisibleModelHeader)?.trim();
+  if (!clientModel || streamInput.sourceAdapterKey !== "anthropic_messages") {
+    return undefined;
+  }
+  if (!streamInput.upstreamResponse.body || !streamInput.upstreamResponse.ok) {
+    return undefined;
+  }
+  const contentType = (streamInput.upstreamResponse.headers.get("content-type") ?? "").toLowerCase();
+  if (!contentType.includes("text/event-stream")) {
+    return undefined;
+  }
+  const headers = new Headers(streamInput.upstreamResponse.headers);
+  headers.delete("content-encoding");
+  headers.delete("content-length");
+  const stream = Readable.fromWeb(streamInput.upstreamResponse.body as unknown as Parameters<typeof Readable.fromWeb>[0]);
+  return new Response(Readable.toWeb(rewriteAnthropicMessageStartModelStream(stream, clientModel)) as ReadableStream<Uint8Array>, {
+    headers,
+    status: streamInput.upstreamResponse.status,
+    statusText: streamInput.upstreamResponse.statusText
+  });
+}
+
+// Default model list, non-streaming responses: the engine buffers JSON bodies
+// for response hooks, so rewrite the message model on the parsed payload. The
+// payload shape (an Anthropic message) is the gate — count_tokens bodies and
+// non-Anthropic JSON pass through untouched.
+function applyClientVisibleModelResponseTransform(
+  responseInput: GatewayResponseHookInput
+): { responsePayload: unknown } | undefined {
+  const clientModel = readHeader(responseInput.request?.headers, ccrClientVisibleModelHeader)?.trim();
+  if (!clientModel) {
+    return undefined;
+  }
+  const rewritten = rewriteAnthropicMessageModelPayload(responseInput.responsePayload, clientModel);
+  return rewritten ? { responsePayload: rewritten } : undefined;
 }
 
 function finalizeOpenRouterDiscountSelection(input: GatewayResponseHookInput | GatewayStreamHookInput): void {
