@@ -3,6 +3,7 @@ import test from "node:test";
 import { createDefaultAppConfig } from "@ccr/core/config/default-config.ts";
 import { compileCoreGatewayConfig } from "@ccr/core/gateway/core-runtime/config-compiler.ts";
 import {
+  ccrAnthropicEffortRequestTransformKey,
   ccrCodexApplyPatchBridgeHeader,
   ccrCodexBridgeRequestTransformKey,
   ccrCodexBridgeResponseHookKey,
@@ -87,6 +88,73 @@ test("CCR router core plugin exposes route endpoint and beforeRouting transform"
   assert.equal(resolved.targetProviderName, providerRuntimeId(config.Providers[1]));
   assert.equal(resolved.model, "beta");
   assert.equal(resolved.requestBody.model, "beta");
+});
+
+test("Anthropic effort uses the selected upstream metadata in both runtime topologies", async () => {
+  const config = createDefaultAppConfig();
+  config.Providers = [
+    { id: "primary", name: "Primary", efforts: ["low", "high", "max"] },
+    { id: "fallback", name: "Fallback", efforts: ["low", "medium", "high"] }
+  ].map(({ efforts, ...provider }) => ({
+    ...provider,
+    type: "anthropic_messages",
+    models: ["glm-5.3"],
+    modelMetadata: { "glm-5.3": { supportedReasoningLevels: efforts.map((effort) => ({ effort })) } }
+  }));
+  const plugin = await createGatewayPlugin({ plugin: { config: { appConfig: config } } });
+  const transform = plugin.requestTransforms.find((item) => item.key === ccrAnthropicEffortRequestTransformKey);
+  assert.equal(transform.stage, "beforeUpstream");
+  const requestBody = Object.freeze({
+    model: "claude-opus-5-5", messages: [], output_config: Object.freeze({ effort: "medium" })
+  });
+  for (const headers of [{}, { [ccrRoutedModelHeader]: "Primary/glm-5.3" }]) {
+    const input = {
+      model: "glm-5.3",
+      request: { headers, method: "POST", url: "/v1/messages" },
+      requestBody,
+      targetProviderConfig: { name: "primary::anthropic_messages::cred:main", type: "anthropic" }
+    };
+    const transformed = await transform.transform(input);
+    assert.equal(transformed.requestBody.output_config.effort, "high");
+    assert.equal(transformed.headers["content-length"], null);
+    assert.equal(transformed.metadata.ccrReasoningEffort, "medium->high");
+    assert.equal(requestBody.output_config.effort, "medium");
+    // Fallback providers can serve the same model ID with different tiers.
+    assert.equal(await transform.transform({
+      ...input, targetProviderConfig: { name: "fallback::anthropic_messages", type: "anthropic" }
+    }), undefined);
+    const publicNameResult = await transform.transform({
+      ...input, targetProviderConfig: { name: "Primary", type: "anthropic" }
+    });
+    assert.equal(publicNameResult.requestBody.output_config.effort, "high");
+  }
+});
+
+test("Anthropic effort does not guess a target or affect other protocols and token counting", async () => {
+  const config = createDefaultAppConfig();
+  config.Providers = [{
+    name: "Primary", type: "anthropic_messages", models: ["glm-5.3"],
+    modelMetadata: { "glm-5.3": { supportedReasoningLevels: [{ effort: "high" }] } }
+  }];
+  const plugin = await createGatewayPlugin({ plugin: { config: { appConfig: config } } });
+  const transform = plugin.requestTransforms.find((item) => item.key === ccrAnthropicEffortRequestTransformKey);
+  const input = {
+    model: "glm-5.3",
+    request: { method: "POST", url: "/v1/messages" },
+    requestBody: { model: "glm-5.3", output_config: { effort: "medium" } },
+    targetProviderConfig: { name: "Primary", type: "anthropic" }
+  };
+  for (const override of [
+    { model: "unconfigured" }, { model: undefined }, { requestBody: null },
+    { targetProviderConfig: undefined },
+    { targetProviderConfig: { name: "Unknown", type: "anthropic" } },
+    { targetProviderConfig: { name: "Primary", type: "openai" } },
+    { request: { method: "GET", url: "/v1/messages" } },
+    ...["/v1/messages/count_tokens", "/v1/responses", "/v1/chat/completions"]
+      .map((url) => ({ request: { method: "POST", url } }))
+  ]) {
+    assert.equal(await transform.transform({ ...input, ...override }), undefined);
+  }
 });
 
 test("CCR router core plugin publishes live token rate snapshots from the single runtime", async () => {
