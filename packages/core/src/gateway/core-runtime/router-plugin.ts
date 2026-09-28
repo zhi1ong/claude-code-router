@@ -19,10 +19,10 @@ import {
   ccrCodexBridgeResponseHookKey,
   ccrCodexBridgeStreamHookKey,
   ccrCodexMultiAgentBridgeHeader,
+  ccrClientIdentityHeader,
   ccrClientVisibleModelHeader,
   ccrClientVisibleModelResponseHookKey,
   ccrClientVisibleModelStreamHookKey,
-  ccrClientIdentityHeader,
   ccrLiveTokenRateConfigMessageType,
   ccrLiveTokenRateSnapshotMessageType,
   ccrLiveTokenRateStreamHookKey,
@@ -365,9 +365,13 @@ export async function createGatewayPlugin(input: GatewayPluginFactoryInput = {})
         if (requestedModel && !isModelAllowedForProfile(config, profile, requestedModel)) {
           return reply.code(403).send(profileModelNotAllowedError(requestedModel));
         }
+        const countTokensTarget = isClaudeDefaultModelListEnabled(profile)
+          ? resolveClaudeDefaultTierTarget(profile, requestedModel)
+          : undefined;
+        const countTokensBody = countTokensTarget ? { ...body, model: countTokensTarget } : body;
         const upstream = await forwardBailianCountTokens({
           apiKey,
-          body,
+          body: countTokensBody,
           config,
           headers: request.headers ?? {},
           request: request.raw,
@@ -379,10 +383,7 @@ export async function createGatewayPlugin(input: GatewayPluginFactoryInput = {})
           for (const [name, value] of Object.entries(upstream.headers)) reply.header?.(name, value);
           return reply.code(upstream.statusCode).send(upstream.body);
         }
-        const countTokensTarget = isClaudeDefaultModelListEnabled(profile)
-          ? resolveClaudeDefaultTierTarget(profile, requestedModel)
-          : undefined;
-        return router.countTokens(countTokensTarget ? { ...body, model: countTokensTarget } : body);
+        return router.countTokens(countTokensBody);
       }
     }],
     requestHooks: [{

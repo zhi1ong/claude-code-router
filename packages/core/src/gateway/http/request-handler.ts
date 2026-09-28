@@ -282,9 +282,13 @@ export class GatewayHttpRequestHandler {
         if (!reserveApiKeyLimits(authorization.apiKey, request, response, requestBody)) {
           return;
         }
+        const countTokensTarget = isClaudeDefaultModelListEnabled(profile)
+          ? resolveClaudeDefaultTierTarget(profile, requestedModel)
+          : undefined;
+        const countTokensBody = countTokensTarget ? { ...body, model: countTokensTarget } : body;
         const upstream = await forwardBailianCountTokens({
           apiKey: authorization.apiKey,
-          body,
+          body: countTokensBody,
           config: this.config,
           headers: request.headers,
           request,
@@ -297,10 +301,7 @@ export class GatewayHttpRequestHandler {
           response.end(upstream.body);
           return;
         }
-        const countTokensTarget = isClaudeDefaultModelListEnabled(profile)
-          ? resolveClaudeDefaultTierTarget(profile, requestedModel)
-          : undefined;
-        sendJson(response, 200, this.plugin.countTokens(countTokensTarget ? { ...body, model: countTokensTarget } : body));
+        sendJson(response, 200, this.plugin.countTokens(countTokensBody));
         return;
       }
 

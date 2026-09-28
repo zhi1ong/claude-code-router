@@ -245,3 +245,27 @@ test("profile restrictions reject count requests before reaching Bailian", async
   }
   assert.equal(fetch.mock.callCount(), 0);
 });
+
+test("Claude tier aliases and dated snapshots count the mapped Bailian model in both runtimes", async (t) => {
+  const models = [];
+  t.mock.method(globalThis, "fetch", async (_url, init) => {
+    models.push(JSON.parse(init.body).model);
+    return Response.json({ input_tokens: 261 });
+  });
+  const config = configFor();
+  config.APIKEYS[0].id = "profile:tiers";
+  config.Router.rules = [];
+  config.profile.profiles = [{
+    id: "tiers", enabled: true, agent: "claude-code", name: "Tiers", scope: "ccr",
+    claudeDefaultModelList: true, model: "bailian/qwen3.7-plus", sonnetModel: "bailian/qwen3.7-plus",
+    availableModels: ["bailian/qwen3.7-plus"], routing: { enabled: false, enhancedRoute: false, rules: [] }
+  }];
+  for (const mode of ["single", "wrapper"]) {
+    for (const model of ["claude-sonnet-5", "claude-sonnet-5[1m]", "claude-sonnet-5-20260923[1m]"]) {
+      const result = await invoke(mode, config, { ...payload, model });
+      assert.equal(result.statusCode, 200);
+      assert.equal(JSON.parse(result.text()).input_tokens, 261);
+    }
+  }
+  assert.deepEqual(models, Array(6).fill("qwen3.7-plus"));
+});
