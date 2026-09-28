@@ -2225,6 +2225,8 @@ export type RequestLogEntry = {
   cacheReadTokens: number;
   cacheWriteTokens: number;
   client: string;
+  clientApiKeyId?: string;
+  clientApiKeyName?: string;
   completedAt?: string;
   costUsd?: number;
   createdAt: string;
@@ -2316,6 +2318,7 @@ export type UsageSeriesPoint = UsageTotals & {
 export type UsageComparisonRow = UsageTotals & {
   caption: string;
   client?: string;
+  clientApiKeyId?: string;
   credentialId?: string;
   key: string;
   label: string;
@@ -2327,6 +2330,7 @@ export type UsageComparisonRow = UsageTotals & {
 
 export type UsageStatsSnapshot = {
   clientModels: UsageComparisonRow[];
+  clients: UsageComparisonRow[];
   generatedAt: string;
   models: UsageComparisonRow[];
   providerModels: UsageComparisonRow[];

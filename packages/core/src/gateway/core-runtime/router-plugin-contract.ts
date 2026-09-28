@@ -44,6 +44,7 @@ export const ccrOpenRouterDiscountRequestIdHeader = "x-ccr-openrouter-discount-r
 export const ccrClientVisibleModelHeader = "x-ccr-client-visible-model";
 export const ccrClientVisibleModelStreamHookKey = "ccr-client-visible-model-stream";
 export const ccrClientVisibleModelResponseHookKey = "ccr-client-visible-model-response";
+export const ccrClientIdentityHeader = "x-ccr-client-identity";
 export const ccrRouteHeaderNames = [
   ccrCodexApplyPatchBridgeHeader,
   ccrCodexMultiAgentBridgeHeader,

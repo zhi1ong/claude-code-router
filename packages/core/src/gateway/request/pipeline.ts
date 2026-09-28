@@ -282,7 +282,12 @@ export class GatewayRequestPipeline {
       const modelBeforeRouting = requestLogRequestedModel(bodyToForward ?? requestBody, path);
       const usageAttributionConfig = coreGatewayUsageAttributionConfig(this.config);
       const recordUsage = (input: Omit<UsageCaptureInput, "config">) => {
-        void recordGatewayUsageCapture({ ...input, config: usageAttributionConfig });
+        void recordGatewayUsageCapture({
+          ...input,
+          clientApiKeyId: apiKey?.id,
+          clientApiKeyName: apiKey?.name,
+          config: usageAttributionConfig
+        });
       };
       const upstreamAbortController = new AbortController();
       let clientDisconnected = false;
@@ -338,6 +343,8 @@ export class GatewayRequestPipeline {
           bodyCapturePolicy: bodyCapture,
           captureBody,
           client,
+          clientApiKeyId: apiKey?.id,
+          clientApiKeyName: apiKey?.name,
           completedAt: new Date().toISOString(),
           durationMs: Date.now() - startedAt,
           error,
@@ -1062,6 +1069,12 @@ export class GatewayRequestPipeline {
           ? rewriteAnthropicMessageModelJsonStream(responseBody, clientVisibleResponseModel)
           : responseBody;
       const sampler = createBodySampler();
+      // Keep accounting on the response before client-facing model rewrites.
+      // Reuse the log sample when the response passes through unchanged.
+      const usageSampler = shouldCaptureUsage && clientResponseBody !== responseBody ? createBodySampler() : sampler;
+      if (usageSampler !== sampler) {
+        responseBody.on("data", (chunk) => usageSampler.append(chunk));
+      }
       const sseErrorDetector = createSseErrorDetector(responseHeaders.get("content-type") ?? undefined);
       let streamDetectedError: string | undefined;
       const clientExperienceMeter = createStreamExperienceMeter({
@@ -1165,7 +1178,7 @@ export class GatewayRequestPipeline {
       if (shouldCaptureUsage) {
         meteredClientResponseBody.once("end", () => {
           recordUsage({
-            bodyText: sampler.read(),
+            bodyText: usageSampler.read(),
             client,
             durationMs: Date.now() - startedAt,
             fallbackModel: routedModel,
