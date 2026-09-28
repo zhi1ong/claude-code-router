@@ -187,6 +187,7 @@ export type AddProfileDraft = {
   botHandoffPhoneBluetoothTargets: string;
   botHandoffPhoneWifiTargets: string;
   botPlatform: string;
+  claudeDefaultModelList: boolean;
   claudeSettingsText: string;
   configFile: string;
   envRows: KeyValueDraftRow[];
