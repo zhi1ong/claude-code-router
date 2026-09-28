@@ -153,6 +153,7 @@ type GatewayRequestTransformInput = {
   };
   sourceAdapterKey?: string;
   stage?: string;
+  targetProvider?: string;
   targetProviderConfig?: Pick<GatewayProviderConfig, "provider" | "type"> & { name?: string };
 };
 
