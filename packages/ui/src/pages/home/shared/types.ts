@@ -169,6 +169,7 @@ export type AddApiKeyDraft = {
   expiresAt: string;
   limitRows: ApiKeyLimitDraftRow[];
   name: string;
+  profileId: string;
 };
 
 export type AddProfileDraft = {
@@ -247,6 +248,7 @@ export type ApiKeyListItem = {
   limits?: ApiKeyLimitConfig;
   masked: string;
   name: string;
+  profileName?: string;
 };
 
 export type AddRoutingRuleDraft = {
