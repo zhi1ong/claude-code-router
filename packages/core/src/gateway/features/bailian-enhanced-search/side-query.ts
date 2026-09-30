@@ -12,9 +12,56 @@ const maxResults = 8;
 const maxDomainFilters = 64;
 const maxDomainFilterLength = 2_048;
 const claudeCodeWebSearchQueryPrefix = /^perform\s+a\s+web\s+search\s+for\s+the\s+query:\s*/i;
-const searchCredentialCooldownMs = 60_000;
-const maxSearchCredentialCooldowns = 1_024;
-const searchCredentialCooldowns = new Map<string, number>();
+
+export type BailianEnhancedSearchOutcome =
+  | { kind: "results"; results: BrowserWebSearchProtocolResult[] }
+  | { kind: "error"; statusCode: number; type: string; message: string };
+
+/**
+ * Run one Bailian EnhancedSearch web search for a provider with the shared
+ * credential selection and cooldown policy. Both protocol bridges
+ * (Anthropic side query and Kimi moonshot_search) call this so authorization
+ * failures cool down identically.
+ */
+export async function executeBailianEnhancedSearchResults(
+  provider: GatewayProviderConfig,
+  query: string,
+  options: { signal?: AbortSignal; timeoutMs?: number } = {}
+): Promise<BailianEnhancedSearchOutcome> {
+  const credential = searchCredential(provider);
+  if (!credential) {
+    return errorOutcome(503, "api_error", "Bailian enhanced web search has no available API key.");
+  }
+  let results: BrowserWebSearchProtocolResult[];
+  try {
+    results = await searchBailianEnhancedWeb({
+      apiKey: credential.apiKey,
+      query,
+      signal: options.signal,
+      timeoutMs: options.timeoutMs ?? sideQueryTimeoutMs
+    });
+  } catch (error) {
+    options.signal?.throwIfAborted();
+    if (error instanceof Error && error.name === "AbortError") {
+      throw error;
+    }
+    const status = bailianEnhancedSearchHttpStatus(error);
+    if (credential.cooldownKey && (status === 401 || status === 403 || status === 429)) {
+      // Search authorization is separate from model access. Do not mark the
+      // provider's normal model credential unhealthy or replay this request.
+      applySearchCredentialCooldown(credential.cooldownKey);
+    }
+    return error instanceof Error && error.name === "TimeoutError"
+      ? errorOutcome(504, "api_error", "Bailian enhanced web search timed out.")
+      : errorOutcome(502, "api_error", "Bailian enhanced web search failed.");
+  }
+  options.signal?.throwIfAborted();
+  return { kind: "results", results };
+}
+
+function errorOutcome(statusCode: number, type: string, message: string): BailianEnhancedSearchOutcome {
+  return { kind: "error", message, statusCode, type };
+}
 
 type DomainFilter = { hostname: string; path?: string[] };
 export type BailianEnhancedSearchSideQueryContext = {
@@ -100,41 +147,18 @@ export async function executeBailianEnhancedSearchSideQuery(
   if (context.validationError) {
     return sideQueryError(400, "invalid_request_error", context.validationError);
   }
-  const credential = searchCredential(context.provider);
-  if (!credential) {
-    return sideQueryError(503, "api_error", "Bailian enhanced web search has no available API key.");
+  const outcome = await executeBailianEnhancedSearchResults(context.provider, context.query, { signal });
+  if (outcome.kind === "error") {
+    return sideQueryError(outcome.statusCode, outcome.type, outcome.message);
   }
-  let results: BrowserWebSearchProtocolResult[];
-  try {
-    results = (await searchBailianEnhancedWeb({ apiKey: credential.apiKey, query: context.query, signal, timeoutMs: sideQueryTimeoutMs }))
-      .filter((result) => resultMatchesDomains(result, context))
-      .slice(0, maxResults)
-      .map((result) => ({
-        title: result.title.slice(0, 500),
-        url: result.url.slice(0, 2_000),
-        ...(result.snippet ? { snippet: result.snippet.slice(0, 4_000) } : {})
-      }));
-  } catch (error) {
-    signal?.throwIfAborted();
-    if (error instanceof Error && error.name === "AbortError") {
-      throw error;
-    }
-    const status = bailianEnhancedSearchHttpStatus(error);
-    if (credential.cooldownKey && (status === 401 || status === 403 || status === 429)) {
-      // Search authorization is separate from model access. Do not mark the
-      // provider's normal model credential unhealthy or replay this request.
-      pruneSearchCredentialCooldowns();
-      if (searchCredentialCooldowns.size >= maxSearchCredentialCooldowns) {
-        const oldest = searchCredentialCooldowns.keys().next().value;
-        if (oldest) searchCredentialCooldowns.delete(oldest);
-      }
-      searchCredentialCooldowns.set(credential.cooldownKey, Date.now() + searchCredentialCooldownMs);
-    }
-    return error instanceof Error && error.name === "TimeoutError"
-      ? sideQueryError(504, "api_error", "Bailian enhanced web search timed out.")
-      : sideQueryError(502, "api_error", "Bailian enhanced web search failed.");
-  }
-  signal?.throwIfAborted();
+  const results = outcome.results
+    .filter((result) => resultMatchesDomains(result, context))
+    .slice(0, maxResults)
+    .map((result) => ({
+      title: result.title.slice(0, 500),
+      url: result.url.slice(0, 2_000),
+      ...(result.snippet ? { snippet: result.snippet.slice(0, 4_000) } : {})
+    }));
   const message = buildSideQueryMessage(context.model, context.query, results);
   return {
     statusCode: 200,
@@ -187,6 +211,19 @@ function sideQueryUserText(body: Record<string, unknown>): string | undefined {
 
 export function stripClaudeCodeWebSearchQueryPrefix(query: string | undefined): string | undefined {
   return query?.trimStart().replace(claudeCodeWebSearchQueryPrefix, "");
+}
+
+const searchCredentialCooldownMs = 60_000;
+const maxSearchCredentialCooldowns = 1_024;
+const searchCredentialCooldowns = new Map<string, number>();
+
+function applySearchCredentialCooldown(cooldownKey: string): void {
+  pruneSearchCredentialCooldowns();
+  if (searchCredentialCooldowns.size >= maxSearchCredentialCooldowns) {
+    const oldest = searchCredentialCooldowns.keys().next().value;
+    if (oldest) searchCredentialCooldowns.delete(oldest);
+  }
+  searchCredentialCooldowns.set(cooldownKey, Date.now() + searchCredentialCooldownMs);
 }
 
 function searchCredential(provider: GatewayProviderConfig): { apiKey: string; cooldownKey?: string } | undefined {

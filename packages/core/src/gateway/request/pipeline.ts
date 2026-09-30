@@ -38,6 +38,7 @@ import {
   shouldRewriteAnthropicMessageStartModel
 } from "@ccr/core/gateway/features/anthropic-response-model";
 import { executeBailianEnhancedSearchSideQuery, prepareBailianEnhancedSearchSideQuery } from "@ccr/core/gateway/features/bailian-enhanced-search";
+import { executeMoonshotSearchRequest, prepareMoonshotSearchRequest } from "@ccr/core/gateway/features/bailian-enhanced-search/moonshot-search";
 import { prepareCursorOpenAICompatChatBody } from "@ccr/core/gateway/features/cursor-compat";
 import { filteredResponseHeaders, formatError, formatUpstreamErrorForLog, forwardHeaders, inferGatewayClient, readRequestBody, sendJson, shouldCaptureGatewayUsage, shouldSendBody, stripLocalGatewayAuthHeaders } from "@ccr/core/gateway/http/io";
 import { appendAggregateErrorAttemptSummary, shouldBufferAggregateErrorBody } from "@ccr/core/gateway/http/error-detail";
@@ -502,6 +503,52 @@ export class GatewayRequestPipeline {
             phase: "enrichment",
             startedAtMs: searchStartedAt,
             target: { model: effectiveModel, provider: enhancedSearch.provider.name }
+          });
+          if (clientDisconnected || response.destroyed) {
+            writeRequestLog(clientClosedRequestStatusCode, responseHeaders, "", false, clientDisconnectMessage);
+            return;
+          }
+          writeRequestLog(result.statusCode, responseHeaders, result.body, false, result.error);
+          response.writeHead(result.statusCode, Object.fromEntries(filteredResponseHeaders(responseHeaders)));
+          response.end(result.body);
+        } catch (error) {
+          if (!clientDisconnected && !upstreamAbortController.signal.aborted) {
+            throw error;
+          }
+          writeRequestLog(clientClosedRequestStatusCode, responseHeaders, "", false, clientDisconnectMessage);
+        }
+        return;
+      }
+
+      // Kimi Code CLI moonshot_search service: POST /v1/search with
+      // {"text_query"} answered directly through the Bailian EnhancedSearch
+      // MCP, so the CLI's web search works when pointed at CCR. Its endpoint is
+      // dedicated (no /v1/messages traffic can match), and it shares the
+      // enhancedSearch provider gate, credentials and cooldowns with the
+      // Claude Code side-query bridge above.
+      const moonshotSearch = prepareMoonshotSearchRequest({
+        config: activeConfig,
+        method,
+        path,
+        body: bodyToForward
+      });
+      if (moonshotSearch) {
+        const searchStartedAt = Date.now();
+        const responseHeaders = new Headers(
+          moonshotSearch.provider ? { "x-gateway-target-provider": providerRuntimeId(moonshotSearch.provider) } : {}
+        );
+        try {
+          const result = await executeMoonshotSearchRequest(moonshotSearch, upstreamAbortController.signal);
+          for (const [name, value] of Object.entries(result.headers)) {
+            responseHeaders.set(name, value);
+          }
+          routeTrace?.capture({
+            durationMs: Date.now() - searchStartedAt,
+            kind: "decision",
+            name: "enrichment.moonshot-search",
+            phase: "enrichment",
+            startedAtMs: searchStartedAt,
+            target: moonshotSearch.provider ? { provider: moonshotSearch.provider.name } : undefined
           });
           if (clientDisconnected || response.destroyed) {
             writeRequestLog(clientClosedRequestStatusCode, responseHeaders, "", false, clientDisconnectMessage);

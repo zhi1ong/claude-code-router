@@ -294,6 +294,7 @@ export async function createGatewayPlugin(input: GatewayPluginFactoryInput = {})
           "GET /api/claude_cli/bootstrap",
           "POST /v1/messages",
           "POST /v1/messages/count_tokens",
+          "POST /v1/search",
           "GET /models",
           "GET /v1/models"
         ],

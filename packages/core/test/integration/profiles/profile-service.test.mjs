@@ -1354,6 +1354,16 @@ test("profile service writes a multi-model Kimi CLI home that points inference t
   const sourceKimiConfig = path.join(sourceKimiHome, "config.toml");
   mkdirSync(path.join(sourceKimiHome, "sessions"), { recursive: true });
   mkdirSync(path.join(sourceKimiHome, "skills"), { recursive: true });
+  const nativeSearchConfig = [
+    '[ services . "moonshot_search" ]',
+    'base_url = "https://api.moonshot.cn/v1/search"',
+    'api_key = "old-direct-search-key"',
+    "[services.moonshot_search.oauth]",
+    'storage = "file"',
+    'key = "native-search-oauth"',
+    "[services.moonshot_search.custom_headers]",
+    'Authorization = "Bearer native-search-token"'
+  ].join("\n");
   writeFileSync(sourceKimiConfig, [
     'default_model = "original/model"',
     "telemetry = false",
@@ -1367,15 +1377,23 @@ test("profile service writes a multi-model Kimi CLI home that points inference t
     'model = "model"',
     "max_context_size = 8192",
     "",
+    nativeSearchConfig,
+    "",
+    "[services.moonshot_fetch]",
+    'base_url = "https://api.moonshot.cn/v1/fetch"',
+    'api_key = "kept-fetch-key"',
+    "",
     "[thinking]",
     "enabled = false",
     ""
   ].join("\n"));
+  const originalSource = readFileSync(sourceKimiConfig, "utf8");
   const config = createDefaultAppConfig();
   config.Providers = [
     {
       api_base_url: "https://example.test/v1",
       api_key: "provider-key",
+      enhancedSearch: { enabled: true },
       modelDisplayNames: { fast: "Fast Model" },
       modelMetadata: {
         fast: {
@@ -1473,8 +1491,14 @@ test("profile service writes a multi-model Kimi CLI home that points inference t
   assert.match(profileConfigContent, /display_name = "Provider \/ Fast Model"/);
   assert.match(profileConfigContent, /telemetry = false/);
   assert.match(profileConfigContent, /\[thinking\]/);
+  // The wrapper directs search to CCR while the copied service configuration
+  // keeps the user's native search/fetch settings intact.
+  assert.equal(profileConfigContent.includes(nativeSearchConfig), true);
+  assert.match(content, /KIMI_WEB_SEARCH_BASE_URL.*http:\/\/127\.0\.0\.1:\d+\/v1\/search/);
+  assert.match(content, /KIMI_WEB_SEARCH_API_KEY.*ccr-kimi-profile-test/);
+  assert.match(profileConfigContent, /\[services\.moonshot_fetch\]\nbase_url = "https:\/\/api\.moonshot\.cn\/v1\/fetch"\napi_key = "kept-fetch-key"/);
   assert.equal(profileConfigContent.includes("original-key"), false);
-  assert.equal(readFileSync(sourceKimiConfig, "utf8").includes("original-key"), true);
+  assert.equal(readFileSync(sourceKimiConfig, "utf8"), originalSource);
   assert.equal(existsSync(path.join(profileKimiHome, "sessions")), true);
   assert.equal(existsSync(path.join(profileKimiHome, "skills")), true);
 
@@ -1493,6 +1517,46 @@ test("profile service writes a multi-model Kimi CLI home that points inference t
   assert.match(legacyProfileConfigContent, /\[models\."DeepSeek\/deepseek-v4-flash"\]\nprovider = "claude-code-router"\nmodel = "DeepSeek\/deepseek-v4-flash"\nmax_context_size = 1050000\ncapabilities = \["tool_use", "image_in", "thinking"\]/);
   assert.match(legacyProfileConfigContent, /\[models\."Zhipu Coding\/glm-5\.2"\]\nprovider = "claude-code-router"\nmodel = "Zhipu Coding\/glm-5\.2"\nmax_context_size = 1049000\ncapabilities = \["tool_use", "image_in", "thinking"\]/);
   assert.match(legacyProfileConfigContent, /\[models\."Fusion\/catalog-context"\]\nprovider = "claude-code-router"\nmodel = "Fusion\/catalog-context"\nmax_context_size = 1050000\ncapabilities = \["tool_use", "image_in", "thinking"\]/);
+});
+
+test("Kimi profiles preserve native search overrides when enhanced search is unavailable", { skip: !process.env.CCR_INTERNAL_HOME_DIR }, async (t) => {
+  const sourceHome = path.join(process.env.CCR_INTERNAL_HOME_DIR, "kimi-native-search");
+  mkdirSync(sourceHome, { recursive: true });
+  const source = '[services.moonshot_search]\nbase_url = "https://native.example/search"\napi_key = "native-search-key"\n';
+  writeFileSync(path.join(sourceHome, "config.toml"), source);
+  const clientFile = path.join(sourceHome, "search-env.mjs");
+  writeFileSync(clientFile, "console.log(JSON.stringify([process.env.KIMI_WEB_SEARCH_BASE_URL, process.env.KIMI_WEB_SEARCH_API_KEY]));\n");
+  const profileEnv = { KIMI_WEB_SEARCH_BASE_URL: "https://profile.example/search", KIMI_WEB_SEARCH_API_KEY: "profile-search-key" };
+  const inheritedEnv = { KIMI_WEB_SEARCH_BASE_URL: "https://inherited.example/search", KIMI_WEB_SEARCH_API_KEY: "inherited-search-key" };
+  for (const providerDisabled of [false, true]) {
+    await t.test(providerDisabled ? "disabled search provider preserves inherited env" : "disabled enhancement preserves profile env", async () => {
+      const profileId = `kimi-native-search-${providerDisabled ? "provider-disabled" : "search-disabled"}`;
+      const config = createDefaultAppConfig();
+      config.Providers = [
+        { api_base_url: "https://search.example/v1", api_key: "search-provider-key", models: ["model"], name: "Search", enabled: !providerDisabled, enhancedSearch: { enabled: providerDisabled } },
+        { api_base_url: "https://inference.example/v1", api_key: "inference-provider-key", models: ["model"], name: "Inference" }
+      ];
+      config.APIKEY = "ccr-kimi-native-search-key";
+      config.APIKEYS = [{ createdAt: "2026-01-01T00:00:00.000Z", id: `profile:${profileId}`, key: config.APIKEY, name: `Profile: ${profileId}` }];
+      config.profile.profiles = [{
+        agent: "kimi", enabled: true, id: profileId, name: profileId,
+        model: "Inference/model", availableModels: ["Inference/model"], scope: "ccr", surface: "cli",
+        env: { CCR_KIMI_BIN: process.execPath, CCR_KIMI_SOURCE_HOME: sourceHome, ...(providerDisabled ? {} : profileEnv) }
+      }];
+      const applied = await applyProfileFixture(config);
+      assert.equal(applied.clients[0].ok, true, applied.clients[0].message);
+      const generated = readFileSync(path.join(CONFIGDIR, "profiles", profileId, "kimi", "config.toml"), "utf8");
+      assert.equal(generated.includes(source.trimEnd()), true);
+      assert.equal(readFileSync(path.join(sourceHome, "config.toml"), "utf8"), source);
+      const wrapperFile = path.join(CONFIGDIR, "bin", `ccr-kimi-cli-wrapper-${profileId}${process.platform === "win32" ? ".cmd" : ""}`);
+      const execution = spawnSync(process.platform === "win32" ? "cmd.exe" : "/bin/sh",
+        process.platform === "win32" ? ["/d", "/c", wrapperFile, clientFile] : [wrapperFile, clientFile], {
+          encoding: "utf8", env: { ...process.env, ...inheritedEnv }
+        });
+      assert.equal(execution.status, 0, execution.stderr);
+      assert.deepEqual(JSON.parse(execution.stdout), Object.values(providerDisabled ? inheritedEnv : profileEnv));
+    });
+  }
 });
 
 test("profile service writes a Pi config and wrapper that points inference to CCR", { skip: !process.env.CCR_INTERNAL_HOME_DIR }, async () => {

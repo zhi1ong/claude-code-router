@@ -7,3 +7,5 @@ export {
   stripClaudeCodeWebSearchQueryPrefix
 } from "@ccr/core/gateway/features/bailian-enhanced-search/side-query";
 export type { BailianEnhancedSearchSideQueryContext, BailianEnhancedSearchSideQueryResponse } from "@ccr/core/gateway/features/bailian-enhanced-search/side-query";
+export { executeMoonshotSearchRequest, moonshotSearchPaths, prepareMoonshotSearchRequest } from "@ccr/core/gateway/features/bailian-enhanced-search/moonshot-search";
+export type { MoonshotSearchContext, MoonshotSearchResponse } from "@ccr/core/gateway/features/bailian-enhanced-search/moonshot-search";

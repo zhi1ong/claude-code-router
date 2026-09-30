@@ -1785,8 +1785,8 @@ function writeKimiWrapper(
   const configResult = writeKimiProfileConfig(config, profile, token, model, models, profileHome);
   const file = kimiWrapperPath(profile);
   const content = process.platform === "win32"
-    ? kimiWrapperCmdScript(config, profile, profileHome)
-    : kimiWrapperShellScript(config, profile, profileHome);
+    ? kimiWrapperCmdScript(config, profile, profileHome, token)
+    : kimiWrapperShellScript(config, profile, profileHome, token);
   const writeResult = writeGeneratedFileIfChanged(file, content, { mode: privateExecutableMode });
   return { changed: configResult.changed || writeResult.changed, file };
 }
@@ -1802,10 +1802,11 @@ function kimiWrapperFilename(profile: ProfileConfig): string {
     : `ccr-kimi-cli-wrapper-${slug}`;
 }
 
-function kimiWrapperShellScript(config: AppConfig, profile: ProfileConfig, profileHome: string): string {
+function kimiWrapperShellScript(config: AppConfig, profile: ProfileConfig, profileHome: string, token: string): string {
   const realKimi = profile.env?.CCR_KIMI_BIN?.trim() || profile.env?.KIMI_BIN?.trim() || "kimi";
+  const searchEnv = kimiSearchBridgeEnv(config, token);
   const envExports = Object.entries(profileEnv(profile))
-    .filter(([key]) => !isKimiManagedEnvKey(key))
+    .filter(([key]) => !isKimiManagedEnvKey(key) && !Object.hasOwn(searchEnv, key))
     .map(([key, value]) => `export ${key}=${shellQuote(value)}`);
   const noProxyHosts = gatewayNoProxyHosts(config);
   return [
@@ -1816,16 +1817,18 @@ function kimiWrapperShellScript(config: AppConfig, profile: ProfileConfig, profi
     "export NO_PROXY no_proxy",
     `unset ${kimiSingleModelEnvNames.join(" ")}`,
     `export KIMI_CODE_HOME=${shellQuote(profileHome)}`,
+    ...shellEnvExports(searchEnv),
     "export CCR_PROFILE_SURFACE=cli",
     `exec ${shellQuote(realKimi)} "$@"`,
     ""
   ].join("\n");
 }
 
-function kimiWrapperCmdScript(config: AppConfig, profile: ProfileConfig, profileHome: string): string {
+function kimiWrapperCmdScript(config: AppConfig, profile: ProfileConfig, profileHome: string, token: string): string {
   const realKimi = profile.env?.CCR_KIMI_BIN?.trim() || profile.env?.KIMI_BIN?.trim() || "kimi";
+  const searchEnv = kimiSearchBridgeEnv(config, token);
   const envExports = Object.entries(profileEnv(profile))
-    .filter(([key]) => !isKimiManagedEnvKey(key))
+    .filter(([key]) => !isKimiManagedEnvKey(key) && !Object.hasOwn(searchEnv, key))
     .map(([key, value]) => cmdSetLine(key, value));
   const noProxyHosts = gatewayNoProxyHosts(config);
   return [
@@ -1835,11 +1838,25 @@ function kimiWrapperCmdScript(config: AppConfig, profile: ProfileConfig, profile
     `set "no_proxy=%no_proxy%,${cmdValue(noProxyHosts)}"`,
     ...kimiSingleModelEnvNames.map((key) => cmdSetLine(key, "")),
     cmdSetLine("KIMI_CODE_HOME", profileHome),
+    ...cmdEnvExports(searchEnv),
     cmdSetLine("CCR_PROFILE_SURFACE", "cli"),
     `${cmdQuote(realKimi)} %*`,
     "exit /b %ERRORLEVEL%",
     ""
   ].join("\r\n");
+}
+
+function kimiSearchBridgeEnv(config: AppConfig, token: string): Record<string, string> {
+  if (!config.Providers.some((provider) => isGatewayProviderEnabled(provider) && provider.enhancedSearch?.enabled === true)) {
+    return {};
+  }
+  // Kimi's endpoint environment override replaces the whole search service,
+  // including persisted OAuth and custom headers. Preserve the source TOML and
+  // use that override only when CCR can actually serve the search bridge.
+  return {
+    KIMI_WEB_SEARCH_BASE_URL: `${gatewayEndpoint(config).replace(/\/+$/g, "")}/v1/search`,
+    KIMI_WEB_SEARCH_API_KEY: token
+  };
 }
 
 const kimiSingleModelEnvNames = [
