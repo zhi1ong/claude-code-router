@@ -679,6 +679,9 @@ function singleGatewayRuntimeBlockers(config: AppConfig, options: SingleGatewayR
   if (config.Providers.some((provider) => provider.enabled !== false && provider.enhancedSearch?.enabled)) {
     blockers.push("bailian-enhanced-search");
   }
+  if (config.profile.enabled !== false && config.profile.profiles.some((profile) => profile.enabled && profile.agent === "kimi")) {
+    blockers.push("kimi-web-search");
+  }
   if (browserAutomationMcpEnabled(config)) blockers.push("browser-automation-mcp");
   if ((options.hasGatewayRoutes ?? (() => pluginService.hasGatewayRoutes()))()) blockers.push("plugin-gateway-routes");
   if ((options.hasGatewayRequestTransforms ?? (() => pluginService.hasGatewayRequestTransforms({ includeBuiltIns: false })))()) {

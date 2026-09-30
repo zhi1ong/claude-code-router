@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { createDefaultAppConfig } from "@ccr/core/config/default-config.ts";
@@ -16,9 +16,16 @@ const gatewayKey = "moonshot-search-gateway-key";
 
 test("moonshot_search serves the Kimi CLI search protocol end to end", { timeout: 90_000 }, async (t) => {
   const searchRequests = [];
+  const nativeRequests = [];
   const upstream = createServer((request, response) => {
-    response.writeHead(404, { "content-type": "application/json" });
-    response.end(JSON.stringify({ error: { message: "the model upstream must not see search traffic" } }));
+    if (request.url !== "/coding/v1/search") {
+      sendJson(response, 404, { error: { message: "the model upstream must not see Bailian search traffic" } });
+      return;
+    }
+    void readJson(request).then((body) => {
+      nativeRequests.push({ headers: request.headers, body });
+      sendJson(response, 200, { search_results: [{ title: "Native Kimi result", url: "https://example.test/kimi", snippet: "Native search." }], native_field: "preserved" });
+    }).catch((error) => sendJson(response, 500, { error: String(error) }));
   });
   const search = createServer((request, response) => {
     void readJson(request).then((body) => {
@@ -38,6 +45,7 @@ test("moonshot_search serves the Kimi CLI search protocol end to end", { timeout
   });
   const previousEntry = process.env.CCR_GATEWAY_ENTRY;
   const previousEndpoint = process.env[bailianEnhancedSearchEndpointEnv];
+  const previousKimiHome = process.env.KIMI_CODE_HOME;
   const previousWorkerFile = requestLogRuntime.options.workerFile;
 
   try {
@@ -51,9 +59,9 @@ test("moonshot_search serves the Kimi CLI search protocol end to end", { timeout
     config.observability.requestLogs = true;
     const initialStatus = await gatewayService.start(config);
     assert.equal(initialStatus.state, "running", initialStatus.lastError);
-    assert.equal(initialStatus.coreEndpoint, initialStatus.endpoint);
+    assert.notEqual(initialStatus.coreEndpoint, initialStatus.endpoint);
 
-    await t.test("disabled search cannot call MCP", async () => {
+    await t.test("search without an authenticated profile cannot call MCP", async () => {
       const result = await postSearch({ text_query: "Shanghai weather" });
       assert.notEqual(result.status, 200);
       assert.equal(searchRequests.length, 0);
@@ -61,7 +69,7 @@ test("moonshot_search serves the Kimi CLI search protocol end to end", { timeout
 
     await t.test("a generated Kimi wrapper reaches /v1/search with its own API key", async () => {
       config = structuredClone(config);
-      config.Providers[0].enhancedSearch.enabled = true;
+      config.Providers[1].enhancedSearch.enabled = true;
       config.profile.profiles = [{
         agent: "kimi",
         availableModels: ["Selected Bailian/search-model"],
@@ -90,7 +98,7 @@ test("moonshot_search serves the Kimi CLI search protocol end to end", { timeout
       writeFileSync(clientFile, `
         const response = await fetch(process.env.KIMI_WEB_SEARCH_BASE_URL, {
           body: JSON.stringify({ text_query: "Shanghai weather" }),
-          headers: { authorization: "Bearer " + process.env.KIMI_WEB_SEARCH_API_KEY, "content-type": "application/json" },
+          headers: { authorization: "Bearer " + process.env.KIMI_WEB_SEARCH_API_KEY, "content-type": "application/json", "x-msh-tool-call-id": "kimi-test-search-call" },
           method: "POST",
           signal: AbortSignal.timeout(5000)
         });
@@ -101,6 +109,7 @@ test("moonshot_search serves the Kimi CLI search protocol end to end", { timeout
       const result = await runSearchClient(wrapperFile, clientFile);
       assert.equal(result.url, `${gatewayService.getStatus().endpoint}/v1/search`);
       assert.equal(result.status, 200, JSON.stringify(result.payload));
+      assert.equal(nativeRequests.length, 0);
       assert.equal(searchRequests.length, before + 3);
       assert.ok(searchRequests.slice(before).every((request) => request.authorization === "Bearer selected-search-key"),
         "the profile search call must resolve through the provider's search key");
@@ -115,6 +124,44 @@ test("moonshot_search serves the Kimi CLI search protocol end to end", { timeout
       assert.match(entry.requestBody.text, /Shanghai weather/);
       assert.match(JSON.stringify(entry), /enrichment\.moonshot-search/);
       assert.doesNotMatch(JSON.stringify(entry), /selected-search-key/);
+    });
+
+    await t.test("Kimi main model uses its own native search despite another provider enabling Bailian", async () => {
+      config = structuredClone(config);
+      config.virtualModelProfiles = [{ enabled: true, match: { exactAliases: ["kimi-main"] },
+        baseModel: { mode: "fixed", fixedModel: "Selected Kimi/kimi-for-coding" } }];
+      config.profile.profiles[0].model = "Fusion/kimi-main";
+      config.profile.profiles[0].availableModels = ["Selected Bailian/search-model", "Fusion/kimi-main"];
+      const applied = await applyProfileConfig(config);
+      assert.ok(applied.clients.find((client) => client.client === "kimi")?.ok);
+      await gatewayService.updateConfig(config);
+      const profileHome = path.join(CONFIGDIR, "profiles", "kimi-search-e2e", "kimi");
+      const wrapperFile = path.join(CONFIGDIR, "bin", `ccr-kimi-cli-wrapper-kimi-search-e2e${process.platform === "win32" ? ".cmd" : ""}`);
+      const before = searchRequests.length;
+      const result = await runSearchClient(wrapperFile, path.join(profileHome, "search-client.mjs"));
+      assert.equal(result.status, 200, JSON.stringify(result.payload));
+      assert.equal(searchRequests.length, before, "Kimi native search must not call Bailian MCP");
+      assert.equal(nativeRequests.length, 1);
+      assert.deepEqual(nativeRequests[0].body, { text_query: "Shanghai weather" });
+      assert.equal(nativeRequests[0].headers.authorization, "Bearer kimi-search-token");
+      assert.equal(nativeRequests[0].headers["x-kimi-client"], "kimi-test-client");
+      assert.equal(nativeRequests[0].headers["x-msh-tool-call-id"], "kimi-test-search-call");
+      assert.equal(result.payload.native_field, "preserved");
+      assert.equal(result.payload.search_results[0].title, "Native Kimi result");
+      for (const provider of config.Providers) if (provider.enhancedSearch) provider.enhancedSearch.enabled = false;
+      process.env.KIMI_CODE_HOME = path.join(profileHome, "oauth-fixture");
+      mkdirSync(path.join(process.env.KIMI_CODE_HOME, "credentials"), { recursive: true });
+      config.providerPlugins[0].key = "ccr-local-agent-selected-kimi-cli-oauth";
+      config.providerPlugins[0].kimiOauth = { key: "kimi-search-e2e" };
+      await gatewayService.updateConfig(config);
+      writeFileSync(path.join(process.env.KIMI_CODE_HOME, "credentials", "kimi-search-e2e.json"), JSON.stringify({
+        access_token: "fresh-kimi-oauth-token", expires_at: Math.floor(Date.now() / 1000) + 3600
+      }));
+      const withoutBailian = await runSearchClient(wrapperFile, path.join(profileHome, "search-client.mjs"));
+      assert.equal(withoutBailian.status, 200, JSON.stringify(withoutBailian.payload));
+      assert.equal(nativeRequests.length, 2, "native search must work without any Bailian enhancement enabled");
+      assert.equal(nativeRequests[1].headers.authorization, "Bearer fresh-kimi-oauth-token", "native search must read live OAuth credentials");
+      assert.equal(searchRequests.length, before);
     });
 
     await t.test("unauthorized and invalid requests cannot reach MCP", async () => {
@@ -135,6 +182,7 @@ test("moonshot_search serves the Kimi CLI search protocol end to end", { timeout
     await Promise.all([closeServer(upstream), closeServer(search)]);
     restoreEnv("CCR_GATEWAY_ENTRY", previousEntry);
     restoreEnv(bailianEnhancedSearchEndpointEnv, previousEndpoint);
+    restoreEnv("KIMI_CODE_HOME", previousKimiHome);
   }
 });
 
@@ -173,11 +221,19 @@ function testConfig(upstreamUrl, publicPort, corePort) {
   config.Router.builtInRules.codex.enabled = false;
   config.Router.fallback = { mode: "off", models: [], retryCount: 0 };
   config.Providers = [{
+    api_base_url: `${upstreamUrl}/v1`, api_key: "wrong-provider-key", models: ["other-model"], name: "Unrelated Bailian",
+    enhancedSearch: { apiKey: "wrong-search-key", enabled: true }, type: "openai_chat_completions"
+  }, {
     api_base_url: `${upstreamUrl}/v1/messages`, api_key: "model-key",
     baseUrl: upstreamUrl, capabilities: [{ baseUrl: upstreamUrl, type: "anthropic_messages" }],
     enhancedSearch: { apiKey: "selected-search-key", enabled: false }, id: "selected",
     models: ["search-model"], name: "Selected Bailian", type: "anthropic_messages"
+  }, {
+    api_base_url: `${upstreamUrl}/coding/v1/chat/completions`, api_key: "ccr-local-agent-login",
+    id: "kimi-native", models: ["kimi-for-coding"], name: "Selected Kimi", type: "openai_chat_completions"
   }];
+  config.providerPlugins = [{ key: "ccr-local-agent-selected-kimi-cli-api-key", providerName: "selected kimi",
+    auth: { headers: { authorization: "Bearer kimi-search-token" } }, request: { headers: { "x-kimi-client": "kimi-test-client" } } }];
   return config;
 }
 

@@ -19,23 +19,33 @@ function enabledConfig() {
 }
 
 function prepare(config = enabledConfig(), body = Buffer.from('{"text_query":"上海天气"}'), method = "POST", path = "/v1/search") {
-  return prepareMoonshotSearchRequest({ config, method, path, body });
+  return prepareMoonshotSearchRequest({ config, method, path, body,
+    profile: { model: "Alibaba Bailian/glm-5.3" } });
 }
 
-test("moonshot_search matches its endpoint and selects the first enabled search provider", () => {
+test("moonshot_search matches its endpoint and follows the profile main model provider", () => {
   assert.equal(prepare().query, "上海天气");
   assert.equal(prepare(undefined, undefined, "POST", "/search").query, "上海天气");
   assert.equal(prepare(undefined, undefined, "GET"), undefined);
   assert.equal(prepare(undefined, undefined, "POST", "/v1/web_search"), undefined);
   assert.equal(prepare(undefined, undefined, "POST", "/v1/messages"), undefined);
   assert.equal(prepareMoonshotSearchRequest({ config: enabledConfig(), method: "POST", path: "/v1/search", body: undefined }), undefined);
-  const config = enabledConfig();
+  let config = enabledConfig();
   config.Providers[1].enhancedSearch = { apiKey: "second-key", enabled: true };
-  assert.equal(prepare(config).provider, config.Providers[0]);
+  const otherProfile = { model: "Other provider/other-model", availableModels: ["Alibaba Bailian/glm-5.3"] };
+  const input = { method: "POST", path: "/v1/search", body: Buffer.from('{"text_query":"上海天气"}') };
+  assert.equal(prepareMoonshotSearchRequest({ ...input, config, profile: otherProfile }).provider, config.Providers[1]);
+  config.virtualModelProfiles = [{ enabled: true, match: { exactAliases: ["search-main"] },
+    baseModel: { mode: "fixed", fixedModel: "Other provider/other-model" } }];
+  config = structuredClone(config);
+  assert.equal(prepareMoonshotSearchRequest({ ...input, config, profile: { model: "Fusion/search-main" } }).provider, config.Providers[1]);
+  assert.equal(prepareMoonshotSearchRequest({ ...input, config, profile: { availableModels: ["Other provider/other-model"] } }).provider, config.Providers[1]);
+  assert.equal(prepareMoonshotSearchRequest({ ...input, config }).provider, undefined);
   config.Providers[0].enabled = false;
-  assert.equal(prepare(config).provider, config.Providers[1]);
+  config = structuredClone(config);
+  assert.equal(prepare(config).provider, undefined);
   config.Providers[1].enhancedSearch.enabled = false;
-  assert.equal(prepare(config), undefined);
+  assert.equal(prepareMoonshotSearchRequest({ ...input, config, profile: otherProfile }).provider, config.Providers[1]);
 });
 
 test("moonshot_search validates text_query before execution", () => {

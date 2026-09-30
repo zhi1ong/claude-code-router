@@ -520,17 +520,15 @@ export class GatewayRequestPipeline {
         return;
       }
 
-      // Kimi Code CLI moonshot_search service: POST /v1/search with
-      // {"text_query"} answered directly through the Bailian EnhancedSearch
-      // MCP, so the CLI's web search works when pointed at CCR. Its endpoint is
-      // dedicated (no /v1/messages traffic can match), and it shares the
-      // enhancedSearch provider gate, credentials and cooldowns with the
-      // Claude Code side-query bridge above.
+      // Kimi searches follow the authenticated profile's main model provider:
+      // native search passthrough, or Bailian MCP when that provider enables it.
       const moonshotSearch = prepareMoonshotSearchRequest({
         config: activeConfig,
         method,
         path,
-        body: bodyToForward
+        body: bodyToForward,
+        headers: request.headers,
+        profile: authenticatedProfile
       });
       if (moonshotSearch) {
         const searchStartedAt = Date.now();

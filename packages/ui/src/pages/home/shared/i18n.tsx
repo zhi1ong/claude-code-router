@@ -2379,7 +2379,7 @@ export const appCopy: Record<ResolvedLanguage, AppCopy> = {
       "US (Virginia)": "美国（弗吉尼亚）",
       "Hong Kong (China)": "中国香港",
       "Enhanced web search": "增强搜索",
-      "Use Bailian enhanced search for Claude Code dedicated WebSearch queries routed to this provider. Kimi CLI profiles use the first enabled provider with enhanced search. Leave the API key empty to use an available provider API key.": "通过百炼增强搜索处理路由到此供应商的 Claude Code 专用 WebSearch 请求。Kimi CLI 配置档案的网页搜索使用列表中首个已启用且开启增强搜索的供应商。API Key 留空则使用供应商中可用的 API Key。",
+      "Use Bailian enhanced search for Claude Code dedicated WebSearch queries routed to this provider. Kimi CLI web searches follow the Agent Profile's primary model provider and use Bailian enhanced search when enabled for that provider. Leave the API key empty to use an available provider API key.": "通过百炼增强搜索处理路由到此供应商的 Claude Code 专用 WebSearch 请求。Kimi CLI 网页搜索跟随 Agent Profile 主模型的供应商，该供应商开启增强搜索时使用百炼增强搜索。API Key 留空则使用供应商中可用的 API Key。",
       "Enhanced search API key": "增强搜索 API Key",
       "Leave empty to use the provider API key": "留空则使用供应商 API Key",
       "providers": "供应商",

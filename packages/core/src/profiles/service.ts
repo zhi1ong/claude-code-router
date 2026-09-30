@@ -1847,12 +1847,9 @@ function kimiWrapperCmdScript(config: AppConfig, profile: ProfileConfig, profile
 }
 
 function kimiSearchBridgeEnv(config: AppConfig, token: string): Record<string, string> {
-  if (!config.Providers.some((provider) => isGatewayProviderEnabled(provider) && provider.enhancedSearch?.enabled === true)) {
-    return {};
-  }
   // Kimi's endpoint environment override replaces the whole search service,
-  // including persisted OAuth and custom headers. Preserve the source TOML and
-  // use that override only when CCR can actually serve the search bridge.
+  // including persisted OAuth and custom headers. Preserve the source TOML;
+  // CCR selects the search provider from this profile's primary model.
   return {
     KIMI_WEB_SEARCH_BASE_URL: `${gatewayEndpoint(config).replace(/\/+$/g, "")}/v1/search`,
     KIMI_WEB_SEARCH_API_KEY: token

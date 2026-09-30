@@ -1519,7 +1519,7 @@ test("profile service writes a multi-model Kimi CLI home that points inference t
   assert.match(legacyProfileConfigContent, /\[models\."Fusion\/catalog-context"\]\nprovider = "claude-code-router"\nmodel = "Fusion\/catalog-context"\nmax_context_size = 1050000\ncapabilities = \["tool_use", "image_in", "thinking"\]/);
 });
 
-test("Kimi profiles preserve native search overrides when enhanced search is unavailable", { skip: !process.env.CCR_INTERNAL_HOME_DIR }, async (t) => {
+test("Kimi profiles route search through CCR even when enhanced search is unavailable", { skip: !process.env.CCR_INTERNAL_HOME_DIR }, async (t) => {
   const sourceHome = path.join(process.env.CCR_INTERNAL_HOME_DIR, "kimi-native-search");
   mkdirSync(sourceHome, { recursive: true });
   const source = '[services.moonshot_search]\nbase_url = "https://native.example/search"\napi_key = "native-search-key"\n';
@@ -1529,7 +1529,7 @@ test("Kimi profiles preserve native search overrides when enhanced search is una
   const profileEnv = { KIMI_WEB_SEARCH_BASE_URL: "https://profile.example/search", KIMI_WEB_SEARCH_API_KEY: "profile-search-key" };
   const inheritedEnv = { KIMI_WEB_SEARCH_BASE_URL: "https://inherited.example/search", KIMI_WEB_SEARCH_API_KEY: "inherited-search-key" };
   for (const providerDisabled of [false, true]) {
-    await t.test(providerDisabled ? "disabled search provider preserves inherited env" : "disabled enhancement preserves profile env", async () => {
+    await t.test(providerDisabled ? "disabled search provider overrides inherited env" : "disabled enhancement overrides profile env", async () => {
       const profileId = `kimi-native-search-${providerDisabled ? "provider-disabled" : "search-disabled"}`;
       const config = createDefaultAppConfig();
       config.Providers = [
@@ -1554,7 +1554,7 @@ test("Kimi profiles preserve native search overrides when enhanced search is una
           encoding: "utf8", env: { ...process.env, ...inheritedEnv }
         });
       assert.equal(execution.status, 0, execution.stderr);
-      assert.deepEqual(JSON.parse(execution.stdout), Object.values(providerDisabled ? inheritedEnv : profileEnv));
+      assert.deepEqual(JSON.parse(execution.stdout), [`http://127.0.0.1:${config.gateway.port}/v1/search`, config.APIKEY]);
     });
   }
 });
