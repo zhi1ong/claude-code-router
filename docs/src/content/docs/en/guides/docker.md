@@ -151,9 +151,11 @@ The reverse proxy should forward all paths to the CCR Nginx and must:
 
 - Support long-running model requests;
 - Not buffer SSE and streaming model responses;
-- Allow an adequate request body size;
+- Allow model API request bodies up to 256 MiB (Nginx: `client_max_body_size 256m;`);
 - Expose only the reverse proxy entrypoint publicly, while host port `3458` stays bound to localhost;
 - Be combined with a firewall, VPN / private network, or additional access control so the management UI is not directly exposed to untrusted networks.
+
+The container Nginx limits model API request bodies to 256 MiB, matching the core gateway. Other routes, including management RPC, retain the 8 MiB default.
 
 ## Persistent data directory
 

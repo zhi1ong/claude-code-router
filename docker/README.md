@@ -134,6 +134,8 @@ services:
 
 Proxy all paths to Nginx and preserve streaming. The external proxy should allow long-lived responses and should not buffer SSE/model streams. Keep the host port private when the reverse proxy is the public entrypoint.
 
+Allow model API request bodies up to 256 MiB at the external proxy (`client_max_body_size 256m;` in Nginx). The container's model API routes use the same 256 MiB limit as the core gateway; other routes, including management RPC, retain the 8 MiB default.
+
 ## Persistent Data
 
 The entrypoint sets `HOME=/data`, so CCR stores files under:
@@ -296,6 +298,8 @@ ports:
 - 上游供应商凭据是第三类凭据，不应拿来代替 CCR 客户端 Key。
 
 Nginx 不会向客户端返回 Token：根路径只会跳转到管理页，并保留请求中已有的 `ccr_web_token` 参数。自动生成的 Token 会在容器日志中打印一次，请把含 Token 的 URL 当作密码。远程部署至少应使用固定强 Token、TLS、主机防火墙或私网，并让反向代理把全部路径转发到 Nginx。流式响应和 SSE 不应被代理缓冲。
+
+外层反向代理应允许最大 256 MiB 的模型 API 请求体（Nginx：`client_max_body_size 256m;`）。容器内的模型 API 路由与核心网关统一限制为 256 MiB；管理 RPC 等其他路由保留 8 MiB 默认限制。
 
 外部端口、域名或协议变化时，必须同步设置公开地址：
 

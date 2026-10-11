@@ -169,6 +169,28 @@ try {
   assert.equal(typeof runningGatewayHealthPayload.runtimeId, "string");
   assert.ok(runningGatewayHealthPayload.runtimeId.length > 0);
 
+  const largeRequestBody = JSON.stringify({
+    max_tokens: 1,
+    messages: [{ role: "user", content: "x".repeat(13 * 1024 * 1024) }],
+    model: "OpenRouter/qwen/qwen3.5-122b-a10b"
+  });
+  const largeApiRequest = await fetch(`${baseUrl}/v1/messages?beta=true`, {
+    body: largeRequestBody,
+    headers: { "content-type": "application/json" },
+    method: "POST"
+  });
+  assert.equal(largeApiRequest.status, 401, "Model API requests larger than 8 MiB must reach gateway authentication");
+  assert.match(largeApiRequest.headers.get("content-type") ?? "", /application\/json/);
+  await largeApiRequest.arrayBuffer();
+
+  const largeManagementRequest = await fetch(`${baseUrl}/api/ccr/rpc`, {
+    body: largeRequestBody,
+    headers: { "content-type": "application/json" },
+    method: "POST"
+  });
+  assert.equal(largeManagementRequest.status, 413, "Management RPC must retain the 8 MiB request body limit");
+  await largeManagementRequest.arrayBuffer();
+
   const configStorage = dockerConfigStorage(containerId);
   assert.equal(configStorage.configDatabase, true);
   assert.equal(configStorage.legacyConfigJson, false);

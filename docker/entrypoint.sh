@@ -174,6 +174,8 @@ server {
   }
 
   location ~ ^/(v1|v1beta|mcp|messages|chat/completions|responses|interactions)(/|$) {
+    # Match the core gateway's 256 MiB limit for model API request bodies.
+    client_max_body_size 256m;
     proxy_http_version 1.1;
     proxy_buffering off;
     proxy_request_buffering off;
