@@ -4,7 +4,7 @@ import { findClaudeDefaultModelTier, resolveClaudeDefaultTierTarget } from "@ccr
 import { createGatewayModelsResponse, createClaudeCliBootstrapResponse, prepareClaudeCodeDiscoveredModelRequest } from "@ccr/core/gateway/features/model-discovery.ts";
 import { isModelAllowedForProfile } from "@ccr/core/profiles/model-allowlist.ts";
 
-const ids = ["claude-fable-5-1[1m]", "claude-opus-5-5[1m]", "claude-sonnet-5-5[1m]", "claude-haiku-4-5-20251001"];
+const ids = ["claude-fable-5-1[1m]", "claude-opus-5-5[1m]", "claude-sonnet-5-5[1m]", "claude-haiku-5-5"];
 const key = { id: "profile:p1" };
 function fixture() {
   const profile = {

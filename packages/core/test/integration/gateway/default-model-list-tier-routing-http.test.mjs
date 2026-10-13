@@ -81,7 +81,7 @@ test("real single and wrapper gateways route default tiers and preserve Anthropi
       capabilities: [{ type: "anthropic_messages", baseUrl }] }];
   const cases = [
     ["/v1/messages", "claude-sonnet-5-5", "sonnet", false],
-    ["/v1/messages", "claude-haiku-4-5-20251001", "haiku", true],
+    ["/v1/messages", "claude-haiku-5-5", "haiku", true],
     ["/v1/chat/completions", "claude-fable-99-preview", "fable", false],
     ["/v1/responses", "claude-opus-5.5", "opus", false]
   ];
@@ -94,7 +94,7 @@ test("real single and wrapper gateways route default tiers and preserve Anthropi
     assert.equal(status.endpoint !== status.coreEndpoint, wrapper);
     const models = await fetch(status.endpoint + "/v1/models", { headers }).then(response => response.json());
     assert.equal(models.data.length, 4);
-    assert.ok(models.data.some(model => model.id === "claude-sonnet-5-5[1m]"));
+    assert.equal(models.data.find(model => model.display_name === "Haiku 5.5")?.id, "claude-haiku-5-5");
     for (const [route, model, target, stream] of cases) {
       const response = await fetch(status.endpoint + route, {
         method: "POST", headers, signal: AbortSignal.timeout(5000),

@@ -57,11 +57,11 @@ export const claudeDefaultModelTiers: readonly ClaudeDefaultModelTier[] = [
     requestPrefix: "claude-sonnet-"
   },
   {
-    description: "Haiku 4.5 · Fastest for quick answers",
-    displayName: "Haiku 4.5",
-    id: "claude-haiku-4-5-20251001",
+    description: "Haiku 5.5 · Fastest for quick answers",
+    displayName: "Haiku 5.5",
+    id: "claude-haiku-5-5",
     maxInputTokens: 200_000,
-    model: "claude-haiku-4-5",
+    model: "claude-haiku-5-5",
     oneMillionContext: false,
     profileSlot: "haikuModel",
     requestPrefix: "claude-haiku-"
