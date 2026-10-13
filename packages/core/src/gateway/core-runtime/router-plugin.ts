@@ -14,6 +14,7 @@ import {
 } from "@ccr/core/gateway/claude-code-router-plugin";
 import {
   ccrAnthropicReasoningResponseHookKey,
+  ccrAnthropicEffortRequestTransformKey,
   ccrCodexApplyPatchBridgeHeader,
   ccrCodexBridgeRequestTransformKey,
   ccrCodexBridgeResponseHookKey,
@@ -61,6 +62,7 @@ import {
   prepareCodexMultiAgentBridgeRequest,
   transformCodexMultiAgentBridgeResponseValue
 } from "@ccr/core/gateway/features/codex-multi-agent-bridge";
+import { normalizeAnthropicReasoningEffort } from "@ccr/core/gateway/features/anthropic-reasoning-effort";
 import { requestLogRequestedModel } from "@ccr/core/observability/request-log-model";
 import { createStreamExperienceMeter, LiveTokenRateTracker } from "@ccr/core/observability/stream-experience";
 import {
@@ -79,6 +81,7 @@ import { RouteScriptRuntime } from "@ccr/core/routing/route-script-runtime";
 import { modelRegistryForConfig, normalizeRouteSelector, parseProviderModelSelector, providerRuntimeId } from "@ccr/core/routing/model-registry";
 import {
   activeProviderCredentials,
+  findProviderByPublicOrInternalName,
   normalizedProviderCapabilities,
   normalizeProviderProtocol,
   providerCapabilityForClientProtocol,
@@ -143,7 +146,7 @@ type GatewayRequestTransformInput = {
   };
   sourceAdapterKey?: string;
   stage?: string;
-  targetProviderConfig?: Pick<GatewayProviderConfig, "provider" | "type">;
+  targetProviderConfig?: Pick<GatewayProviderConfig, "provider" | "type"> & { name?: string };
 };
 
 type UpstreamRequest = {
@@ -444,6 +447,11 @@ export async function createGatewayPlugin(input: GatewayPluginFactoryInput = {})
       stage: "beforeUpstream",
       transform: (requestInput: GatewayRequestTransformInput) =>
         applyCodexBridgeRequestTransform(config, requestInput)
+    }, {
+      key: ccrAnthropicEffortRequestTransformKey,
+      stage: "beforeUpstream",
+      transform: (requestInput: GatewayRequestTransformInput) =>
+        applyAnthropicEffortRequestTransform(config, requestInput)
     }],
     responseHooks: [{
       key: ccrAnthropicReasoningResponseHookKey,
@@ -687,6 +695,36 @@ async function handleRemoteControlRoute(
     sendJson: sendRawJson
   });
   return reply;
+}
+
+function applyAnthropicEffortRequestTransform(config: AppConfig, input: GatewayRequestTransformInput) {
+  const method = input.route?.method ?? input.request?.method ?? "GET";
+  const path = requestPath(input.route?.url ?? input.request?.url ?? "/");
+  const protocol = normalizeProviderProtocol(input.targetProviderConfig?.type) ??
+    normalizeProviderProtocol(input.targetProviderConfig?.provider);
+  if (
+    method.toUpperCase() !== "POST" ||
+    requestProtocolForPath(path) !== "anthropic_messages" ||
+    protocol !== "anthropic_messages" ||
+    !isRecord(input.requestBody)
+  ) {
+    return undefined;
+  }
+
+  const providerName = stringValue(input.targetProviderConfig?.name);
+  const model = stringValue(input.model);
+  const provider = providerName ? findProviderByPublicOrInternalName(config, providerName) : undefined;
+  if (!provider || !model) {
+    return undefined;
+  }
+  // Runs after target routing and before the first upstream send in both
+  // runtime topologies. Later attempts use their own selected target.
+  const normalized = normalizeAnthropicReasoningEffort(input.requestBody, provider, model);
+  return normalized ? {
+    requestBody: normalized.body,
+    headers: { "content-length": null },
+    metadata: { ccrReasoningEffort: `${normalized.before}->${normalized.after}` }
+  } : undefined;
 }
 
 function applyCodexBridgeRequestTransform(
