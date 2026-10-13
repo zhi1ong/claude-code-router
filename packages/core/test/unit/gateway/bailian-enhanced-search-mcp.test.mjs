@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { searchBailianEnhancedWeb } from "@ccr/core/gateway/features/bailian-enhanced-search/mcp.ts";
+import { executeBailianEnhancedSearchSideQuery } from "@ccr/core/gateway/features/bailian-enhanced-search/side-query.ts";
+import { readProviderCredentialCooldown } from "@ccr/core/providers/credential-pool.ts";
 
 const input = { apiKey: "search-secret", endpoint: "http://127.0.0.1/mcp", query: "Shanghai weather", timeoutMs: 1000 };
 const rpc = (id, result) => Response.json({ id, jsonrpc: "2.0", result });
@@ -100,4 +102,53 @@ test("the deadline cancels a hanging SSE response without another request", asyn
   }
   assert.equal(cancelled, true);
   assert.equal(requests.length, 3);
+});
+
+test("search refusals isolate pool keys until expiry or rotation without cooling model access", async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  for (const status of [401, 403, 429, 500, "network"]) await t.test(String(status), async (t) => {
+    const provider = { id: `cooldown-${status}`, name: `Cooldown ${status}`, enhancedSearch: { enabled: true },
+      credentials: [{ id: "first", api_key: "first-key", priority: 1 }, { id: "second", api_key: "second-key", priority: 2 }] };
+    const [first, second] = provider.credentials;
+    let rejectedKey = first.api_key;
+    const calls = [];
+    t.mock.method(globalThis, "fetch", async (_url, init) => {
+      const body = JSON.parse(init.body);
+      calls.push(init.headers.authorization);
+      if (body.method === "tools/call" && init.headers.authorization === `Bearer ${rejectedKey}`) {
+        if (status === "network") throw Object.assign(new Error("HTTP 401"), { statusCode: 401 });
+        return new Response(null, { status });
+      }
+      return body.method === "notifications/initialized" ? new Response(null, { status: 202 })
+        : rpc(body.id, body.method === "initialize" ? {} : tool());
+    });
+    const context = { provider, query: input.query, model: "search-model", stream: false };
+    const run = () => executeBailianEnhancedSearchSideQuery(context);
+    assert.equal((await run()).statusCode, 502);
+    assert.equal(calls.length, 3, "the failed search is not replayed");
+    assert.equal(readProviderCredentialCooldown(provider, first), undefined);
+    if (status === 500 || status === "network") {
+      rejectedKey = undefined;
+      assert.equal((await run()).statusCode, 200);
+      assert.equal(calls.at(-1), `Bearer ${first.api_key}`);
+      return;
+    }
+    assert.equal((await run()).statusCode, 200);
+    assert.equal(calls.at(-1), `Bearer ${second.api_key}`);
+    rejectedKey = second.api_key;
+    assert.equal((await run()).statusCode, 502);
+    now += 59_999;
+    const before = calls.length;
+    assert.equal((await run()).statusCode, 503);
+    assert.equal(calls.length, before, "all keys are still cooling");
+    first.api_key = "edited-key";
+    assert.equal((await run()).statusCode, 200);
+    assert.equal(calls.at(-1), "Bearer edited-key");
+    first.api_key = "first-key";
+    rejectedKey = undefined;
+    now += 2;
+    assert.equal((await run()).statusCode, 200);
+    assert.equal(calls.at(-1), "Bearer first-key");
+  });
 });

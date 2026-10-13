@@ -19,9 +19,13 @@ type BailianEnhancedSearchInput = {
 };
 
 class BailianEnhancedSearchError extends Error {
-  constructor(message: string, readonly retryable = false) {
+  constructor(message: string, readonly retryable = false, readonly statusCode?: number) {
     super(message);
   }
+}
+
+export function bailianEnhancedSearchHttpStatus(error: unknown): number | undefined {
+  return error instanceof BailianEnhancedSearchError ? error.statusCode : undefined;
 }
 
 export function normalizeBailianEnhancedSearchQuery(query: string | undefined): string | undefined {
@@ -134,7 +138,7 @@ async function postBailianEnhancedSearchRpc(
   });
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);
-    throw new BailianEnhancedSearchError(`Bailian enhanced search endpoint returned HTTP ${response.status}.`);
+    throw new BailianEnhancedSearchError(`Bailian enhanced search endpoint returned HTTP ${response.status}.`, false, response.status);
   }
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
   let message: Record<string, unknown> | undefined;

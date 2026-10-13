@@ -1,10 +1,10 @@
-import { randomUUID } from "node:crypto";
-import type { AppConfig, GatewayProviderConfig } from "@ccr/core/contracts/app";
+import { createHash, randomUUID } from "node:crypto";
+import type { AppConfig, GatewayProviderConfig, ProviderCredentialConfig } from "@ccr/core/contracts/app";
 import { isRecord, stringValue } from "@ccr/core/gateway/internal/value";
 import type { BrowserWebSearchProtocolResult } from "@ccr/core/gateway/internal/shared";
-import { normalizeBailianEnhancedSearchQuery, searchBailianEnhancedWeb } from "@ccr/core/gateway/features/bailian-enhanced-search/mcp";
-import { modelRegistryForConfig } from "@ccr/core/routing/model-registry";
-import { activeProviderCredentials, providerCredentialApiKey } from "@ccr/core/providers/runtime-topology";
+import { bailianEnhancedSearchHttpStatus, normalizeBailianEnhancedSearchQuery, searchBailianEnhancedWeb } from "@ccr/core/gateway/features/bailian-enhanced-search/mcp";
+import { modelRegistryForConfig, providerRuntimeId } from "@ccr/core/routing/model-registry";
+import { activeProviderCredentials, providerCredentialApiKey, providerCredentialRuntimeId } from "@ccr/core/providers/runtime-topology";
 import { reserveProviderCredentialUsage } from "@ccr/core/providers/credential-pool";
 import { selectProviderCredentials } from "@ccr/core/gateway/upstream/executor";
 
@@ -13,6 +13,9 @@ const maxResults = 8;
 const maxDomainFilters = 64;
 const maxDomainFilterLength = 2_048;
 const claudeCodeWebSearchQueryPrefix = /^perform\s+a\s+web\s+search\s+for\s+the\s+query:\s*/i;
+const searchCredentialCooldownMs = 60_000;
+const maxSearchCredentialCooldowns = 1_024;
+const searchCredentialCooldowns = new Map<string, number>();
 
 type DomainFilter = { hostname: string; path?: string[] };
 export type BailianEnhancedSearchSideQueryContext = {
@@ -104,7 +107,7 @@ export async function executeBailianEnhancedSearchSideQuery(
   }
   let results: BrowserWebSearchProtocolResult[];
   try {
-    results = (await searchBailianEnhancedWeb({ apiKey: credential, query: context.query, signal, timeoutMs: sideQueryTimeoutMs }))
+    results = (await searchBailianEnhancedWeb({ apiKey: credential.apiKey, query: context.query, signal, timeoutMs: sideQueryTimeoutMs }))
       .filter((result) => resultMatchesDomains(result, context))
       .slice(0, maxResults)
       .map((result) => ({
@@ -116,6 +119,15 @@ export async function executeBailianEnhancedSearchSideQuery(
     signal?.throwIfAborted();
     if (error instanceof Error && error.name === "AbortError") {
       throw error;
+    }
+    const status = bailianEnhancedSearchHttpStatus(error);
+    if (credential.cooldownKey && (status === 401 || status === 403 || status === 429)) {
+      // Search refusals must not mark the normal model credential unhealthy.
+      if (searchCredentialCooldowns.size >= maxSearchCredentialCooldowns) {
+        const oldest = searchCredentialCooldowns.keys().next().value;
+        if (oldest) searchCredentialCooldowns.delete(oldest);
+      }
+      searchCredentialCooldowns.set(credential.cooldownKey, Date.now() + searchCredentialCooldownMs);
     }
     return error instanceof Error && error.name === "TimeoutError"
       ? sideQueryError(504, "api_error", "Bailian enhanced web search timed out.")
@@ -176,20 +188,33 @@ export function stripClaudeCodeWebSearchQueryPrefix(query: string | undefined): 
   return query?.trimStart().replace(claudeCodeWebSearchQueryPrefix, "");
 }
 
-function searchCredential(provider: GatewayProviderConfig): string | undefined {
+function searchCredential(provider: GatewayProviderConfig): { apiKey: string; cooldownKey?: string } | undefined {
   const dedicated = provider.enhancedSearch?.apiKey?.trim();
   if (dedicated) {
-    return dedicated;
+    return { apiKey: dedicated };
   }
   if (provider.credentials?.length) {
+    for (const [key, until] of searchCredentialCooldowns) {
+      if (until <= Date.now()) searchCredentialCooldowns.delete(key);
+    }
+    const credentials = activeProviderCredentials(provider).filter((credential) =>
+      !searchCredentialCooldowns.has(searchCredentialCooldownKey(provider, credential))
+    );
     const usage = { totalTokens: 0, imageCount: 0 };
-    const selected = selectProviderCredentials(provider, "anthropic_messages", activeProviderCredentials(provider), usage);
+    const selected = selectProviderCredentials(provider, "anthropic_messages", credentials, usage);
     const credential = selected.credentials[0]?.credential;
     return !selected.saturated && credential && reserveProviderCredentialUsage(provider, credential, usage)
-      ? providerCredentialApiKey(credential)
+      ? { apiKey: providerCredentialApiKey(credential), cooldownKey: searchCredentialCooldownKey(provider, credential) }
       : undefined;
   }
-  return provider.apikey?.trim() || provider.apiKey?.trim() || provider.api_key?.trim() || undefined;
+  const apiKey = provider.apikey?.trim() || provider.apiKey?.trim() || provider.api_key?.trim();
+  return apiKey ? { apiKey } : undefined;
+}
+
+function searchCredentialCooldownKey(provider: GatewayProviderConfig, credential: ProviderCredentialConfig): string {
+  return createHash("sha256")
+    .update(JSON.stringify([providerRuntimeId(provider), providerCredentialRuntimeId(provider, credential), providerCredentialApiKey(credential)]))
+    .digest("hex");
 }
 
 function parseDomainFilters(value: unknown): DomainFilter[] | undefined {
