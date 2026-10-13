@@ -8,6 +8,7 @@ import { createDefaultAppConfig } from "@ccr/core/config/default-config.ts";
 import { ccrClientIdentityHeader, ccrClientVisibleModelHeader } from "@ccr/core/gateway/core-runtime/router-plugin-contract.ts";
 import { rawTraceSyncHeader } from "@ccr/core/gateway/internal/shared.ts";
 import { RawTraceSynchronizer } from "@ccr/core/observability/raw-trace-sync.ts";
+import { RequestLogStore } from "@ccr/core/observability/request-log-store.ts";
 import { UsageStore, usageStore } from "@ccr/core/usage/store.ts";
 
 test("JSON and SSE traces retain key identity and physical model attribution", async (t) => {
@@ -15,6 +16,7 @@ test("JSON and SSE traces retain key identity and physical model attribution", a
   const pricing = { inputUsdPerMillionTokens: 1, outputUsdPerMillionTokens: 2 };
   const estimates = [];
   const updates = [];
+  const logs = new RequestLogStore(path.join(dir, "logs.sqlite"));
   const store = new UsageStore(path.join(dir, "usage.sqlite"), { estimateCost: async input => { estimates.push(input); return undefined; } });
   t.mock.method(usageStore, "hasRequestId", (requestId) => store.hasRequestId(requestId));
   t.mock.method(usageStore, "recordCapture", (input) => store.recordCapture(input));
@@ -23,7 +25,12 @@ test("JSON and SSE traces retain key identity and physical model attribution", a
   config.observability.requestLogs = true;
   config.observability.requestLogBodyCapture = "all";
   const synchronizer = new RawTraceSynchronizer({
-    enqueueUpdate: input => { updates.push(input); return true; },
+    allowStandaloneRequestLogs: () => true,
+    enqueueUpdate: async (input, rawTraceFiles) => {
+      updates.push(input);
+      await logs.writeBatch([{ sequence: updates.length, kind: "raw-trace-update", input, rawTraceFiles }]);
+      return true;
+    },
     getConfig: () => config,
     spoolDirectory: dir
   });
@@ -40,6 +47,9 @@ test("JSON and SSE traces retain key identity and physical model attribution", a
     ]) {
       await deliverBundle(synchronizer, dir, requestId, requestId, headers, stream);
     }
+    const priced = (await logs.list()).items.filter(row => row.resolvedModel === "physical");
+    assert.equal(priced.length, 2);
+    assert.ok(priced.every(row => Math.abs((row.costUsd ?? 0) - 0.00002) < 1e-12));
 
     // A later trace must not add a second usage event or erase a known identity.
     await deliverBundle(synchronizer, dir, "replayed-client", "explicit-client", {});
@@ -64,6 +74,7 @@ test("JSON and SSE traces retain key identity and physical model attribution", a
     assert.equal(stats.clients[1].clientApiKeyId, undefined);
   } finally {
     await synchronizer.stop();
+    await logs.close();
     rmSync(dir, { force: true, recursive: true });
   }
 });
