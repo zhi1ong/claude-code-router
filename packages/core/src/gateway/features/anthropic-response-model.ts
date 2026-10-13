@@ -1,4 +1,4 @@
-import { Readable, Transform } from "node:stream";
+import { pipeline, Readable, Transform } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import type { GatewayProviderProtocol } from "@ccr/core/contracts/app";
 import { isRecord, stringValue } from "@ccr/core/gateway/internal/value";
@@ -60,7 +60,7 @@ export function rewriteAnthropicMessageModelJsonStream(
   const chunks: Buffer[] = [];
   let bufferedBytes = 0;
   let passthrough = false;
-  return input.pipe(new Transform({
+  return pipeline(input, new Transform({
     transform(chunk, _encoding, callback) {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       if (passthrough) {
@@ -97,7 +97,7 @@ export function rewriteAnthropicMessageModelJsonStream(
       }
       callback();
     }
-  }));
+  }), () => {});
 }
 
 export function rewriteAnthropicMessageStartModelStream(
@@ -111,7 +111,8 @@ export function rewriteAnthropicMessageStartModelStream(
 
   const decoder = new StringDecoder("utf8");
   let pending = "";
-  return input.pipe(new Transform({
+  // Link upstream failures and downstream cancellation to the returned stream.
+  return pipeline(input, new Transform({
     transform(chunk, _encoding, callback) {
       pending += decoder.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
       pending = drainAnthropicSseBlocks(this, pending, replacementModel, false);
@@ -123,7 +124,7 @@ export function rewriteAnthropicMessageStartModelStream(
       pending = "";
       callback();
     }
-  }));
+  }), () => {});
 }
 
 function drainAnthropicSseBlocks(

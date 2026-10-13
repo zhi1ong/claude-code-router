@@ -44,7 +44,11 @@ test("real single and wrapper gateways route default tiers and preserve Anthropi
         { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
         { type: "message_stop" }
       ];
-      response.end(events.map(event => "event: " + event.type + "\ndata: " + JSON.stringify(event) + "\n\n").join(""));
+      const chunks = events.map(event => "event: " + event.type + "\ndata: " + JSON.stringify(event) + "\n\n");
+      if (body.messages[0]?.content === "reset") {
+        response.write(chunks[0]);
+        setTimeout(() => response.destroy(), 10);
+      } else response.end(chunks.join(""));
     }
   });
   const previousEntry = process.env.CCR_GATEWAY_ENTRY;
@@ -109,6 +113,17 @@ test("real single and wrapper gateways route default tiers and preserve Anthropi
       method: "POST", headers, body: JSON.stringify({ model: "claude-sonnet-99", messages: [] })
     }).then(response => response.json());
     assert.equal(typeof counted.input_tokens, "number");
+    await assert.rejects(async () => {
+      const reset = await fetch(status.endpoint + "/v1/messages", {
+        method: "POST", headers, signal: AbortSignal.timeout(5000),
+        body: JSON.stringify({ model: "claude-sonnet-5-5", stream: true, max_tokens: 16,
+          messages: [{ role: "user", content: "reset" }] })
+      });
+      await reset.text();
+    });
+    assert.equal(received.at(-1), "sonnet");
+    assert.equal((await fetch(status.endpoint + "/v1/models", { headers })).status, 200);
+    assert.equal(gatewayService.getStatus().state, "running");
   }
 });
 function listen(server) {
