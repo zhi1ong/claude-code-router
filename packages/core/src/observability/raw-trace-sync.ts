@@ -21,8 +21,10 @@ import { rawTraceMaxPartBytes, resolveRawTraceBodyLimit } from "@ccr/core/observ
 import { isRecord, numberValue, stringValue } from "@ccr/core/gateway/internal/value";
 import { formatError, inferGatewayClient, parseJsonObject, readHeader, readRequestBody, sendJson, shouldCaptureGatewayUsage } from "@ccr/core/gateway/http/io";
 import { endpoint } from "@ccr/core/gateway/core-runtime/supervisor";
+import { ccrRoutedModelHeader, ccrClientIdentityHeader, ccrClientVisibleModelHeader } from "@ccr/core/gateway/core-runtime/router-plugin-contract";
 import { maxUsageCaptureBytes, rawTraceSyncHeader, rawTraceSyncPath } from "@ccr/core/gateway/internal/shared";
 import type { RawTracePartText } from "@ccr/core/gateway/internal/shared";
+import { requestLogRequestedModel, requestLogResponseModel } from "@ccr/core/observability/request-log-model";
 import { resolveResponseProviderProtocol } from "@ccr/core/providers/runtime-topology";
 import { recordGatewayUsageCaptureIfMissing } from "@ccr/core/usage/store";
 import { modelRegistryForConfig } from "@ccr/core/routing/model-registry";
@@ -55,6 +57,7 @@ type RawTraceSynchronizerDependencies = {
 };
 
 type RawTraceRequestLogBundle = {
+  clientVisibleModel?: string;
   files: RequestLogRawTraceFiles;
   update: RequestLogRawTraceUpdateInput;
 };
@@ -395,7 +398,7 @@ export class RawTraceSynchronizer {
         this.retryStates.delete(stored.bundleId);
         return true;
       }
-      await recordUsageCaptureFromRawTrace(config, bundle.update, bundle.files);
+      await recordUsageCaptureFromRawTrace(config, bundle.update, bundle.files, bundle.clientVisibleModel);
       if (!shouldRecordRequestLogs(config)) {
         await this.cleanupStoredBundle(stored);
         this.retryStates.delete(stored.bundleId);
@@ -1527,7 +1530,8 @@ export function rawTraceRequestOutcome(
 async function recordUsageCaptureFromRawTrace(
   config: AppConfig,
   input: RequestLogRawTraceUpdateInput,
-  files: RequestLogRawTraceFiles
+  files: RequestLogRawTraceFiles,
+  clientVisibleModel?: string
 ): Promise<void> {
   const method = input.method ?? "POST";
   const path = input.path ?? pathFromUrl(input.url) ?? "/";
@@ -1536,8 +1540,17 @@ async function recordUsageCaptureFromRawTrace(
   }
 
   const responseHeaders = headersFromRawTrace(input.responseHeaders);
+  const bodyText = await rawTraceUsageBodyText(input, files.responseBody);
+  // Only override a confirmed client-facing rewrite. Ordinary upstream aliases
+  // such as "auto" must still be attributed to the model returned upstream.
+  const upstreamModel = clientVisibleModel && requestLogResponseModel(bodyText) === clientVisibleModel
+    ? await readRawTraceRequestModel(files.requestBody, input.url)
+    : undefined;
   await recordGatewayUsageCaptureIfMissing({
-    bodyText: await rawTraceUsageBodyText(input, files.responseBody),
+    bodyText,
+    client: input.client,
+    clientApiKeyId: input.clientApiKeyId,
+    clientApiKeyName: input.clientApiKeyName,
     config,
     durationMs: numberValue(input.durationMs) ?? 0,
     fallbackModel: input.model,
@@ -1547,7 +1560,8 @@ async function recordUsageCaptureFromRawTrace(
     providerProtocol: resolveResponseProviderProtocol(responseHeaders, config),
     requestId: input.requestId,
     responseHeaders,
-    statusCode: numberValue(input.statusCode) ?? 0
+    statusCode: numberValue(input.statusCode) ?? 0,
+    upstreamModel
   });
 }
 
@@ -1630,6 +1644,7 @@ export async function readRawTraceRequestLogBundle(
 
   const [
     clientRequestMetadata,
+    clientRequestBody,
     upstreamRequestMetadata,
     upstreamResponseMetadata,
     upstreamRequestBody,
@@ -1637,6 +1652,7 @@ export async function readRawTraceRequestLogBundle(
     fallbackResponseBody
   ] = await Promise.all([
     readRawTraceJsonPart(parts, "client_request_metadata", spoolDirectory),
+    readRawTracePart(parts, "client_request", spoolDirectory),
     readRawTraceJsonPart(parts, "upstream_request_metadata", spoolDirectory),
     readRawTraceJsonPart(parts, "upstream_response_metadata", spoolDirectory),
     readRawTracePart(parts, "upstream_request", spoolDirectory),
@@ -1648,7 +1664,14 @@ export async function readRawTraceRequestLogBundle(
   const rawUrl = stringValue(upstreamRequestMetadata?.url);
   const url = sanitizeUrlForLog(rawUrl);
   const clientRequestHeaders = headerRecordFromUnknown(clientRequestMetadata?.headers);
+  const clientIdentity = readRawTraceClientIdentity(clientRequestHeaders);
   const upstreamRequestHeaders = headerRecordFromUnknown(upstreamRequestMetadata?.headers);
+  // The engine can derive target.model from a rewritten response. Keep the
+  // route's two ends anchored to requests, regardless of SSE/JSON hook order.
+  const [requestedModel, resolvedModel] = await Promise.all([
+    readRawTraceRequestModel(clientRequestBody, stringValue(clientRequestMetadata?.url)),
+    readRawTraceRequestModel(upstreamRequestBody, rawUrl)
+  ]);
   const client = inferGatewayClient(undefined, clientRequestHeaders ?? {});
   const attempt = positiveAttemptNumber(readUnknownHeader(
     clientRequestHeaders,
@@ -1656,6 +1679,7 @@ export async function readRawTraceRequestLogBundle(
   ));
 
   return {
+    clientVisibleModel: stringValue(readUnknownHeader(clientRequestHeaders, ccrClientVisibleModelHeader)),
     files: {
       cleanupDirectory: rawTraceBundleDirectory(parts, spoolDirectory),
       requestBody: upstreamRequestBody,
@@ -1666,12 +1690,15 @@ export async function readRawTraceRequestLogBundle(
       ...(stringValue(manifest.uploadedAt) ? { bundleCapturedAt: stringValue(manifest.uploadedAt) } : {}),
       ...(bundleId ? { bundleId } : {}),
       ...(client ? { client } : {}),
+      ...clientIdentity,
       ...(stringValue(manifest.completedAt) ? { completedAt: stringValue(manifest.completedAt) } : {}),
       ...(numberValue(manifest.durationMs) !== undefined ? { durationMs: numberValue(manifest.durationMs) } : {}),
       method: stringValue(upstreamRequestMetadata?.method) || "POST",
       model: stringValue(target.model),
       path: pathFromUrl(url),
       provider: stringValue(target.providerName) || stringValue(target.provider),
+      requestedModel,
+      resolvedModel: resolvedModel || stringValue(readUnknownHeader(clientRequestHeaders, ccrRoutedModelHeader)),
       requestBodyContentType: upstreamRequestBody?.contentType,
       requestBodySizeBytes: upstreamRequestBody?.sizeBytes,
       requestBodyTruncated: upstreamRequestBody?.truncated,
@@ -1687,6 +1714,41 @@ export async function readRawTraceRequestLogBundle(
       url
     }
   };
+}
+
+function readRawTraceClientIdentity(
+  headers: Record<string, string> | undefined
+): Pick<RequestLogRawTraceUpdateInput, "clientApiKeyId" | "clientApiKeyName"> {
+  const encoded = stringValue(readUnknownHeader(headers, ccrClientIdentityHeader));
+  if (!encoded) return {};
+  try {
+    const identity = parseJsonObject(Buffer.from(encoded, "base64url"));
+    const clientApiKeyId = stringValue(identity.id);
+    const clientApiKeyName = stringValue(identity.name);
+    return clientApiKeyId ? {
+      clientApiKeyId,
+      ...(clientApiKeyName ? { clientApiKeyName } : {})
+    } : {};
+  } catch {
+    return {};
+  }
+}
+
+async function readRawTraceRequestModel(
+  part: RequestLogRawTraceFile | undefined,
+  url: string | undefined
+): Promise<string | undefined> {
+  const path = pathFromUrl(url);
+  // Raw bodies may be arbitrarily large; extracting a summary must not load
+  // an unbounded sidecar into memory. Missing client models stay unknown.
+  if (!part || part.truncated || part.sizeBytes > maxUsageCaptureBytes) {
+    return requestLogRequestedModel("", path);
+  }
+  try {
+    return requestLogRequestedModel(await readFile(part.filePath, "utf8"), path);
+  } catch {
+    return requestLogRequestedModel("", path);
+  }
 }
 
 function readUnknownHeader(headers: unknown, name: string): unknown {

@@ -33,6 +33,7 @@ export type CcrLiveTokenRateSnapshotMessage = {
   type: typeof ccrLiveTokenRateSnapshotMessageType;
 };
 
+export const ccrClientIdentityHeader = "x-ccr-client-identity";
 export const ccrRouteStageHeader = "x-ccr-route-stage";
 export const ccrRouteReasonHeader = "x-ccr-route-reason";
 export const ccrRouteSourceHeader = "x-ccr-route-source";
