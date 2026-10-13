@@ -398,7 +398,7 @@ export class RawTraceSynchronizer {
         this.retryStates.delete(stored.bundleId);
         return true;
       }
-      await recordUsageCaptureFromRawTrace(config, bundle.update, bundle.files, bundle.clientVisibleModel);
+      const pricingModel = await recordUsageCaptureFromRawTrace(config, bundle.update, bundle.files, bundle.clientVisibleModel);
       if (!shouldRecordRequestLogs(config)) {
         await this.cleanupStoredBundle(stored);
         this.retryStates.delete(stored.bundleId);
@@ -408,7 +408,7 @@ export class RawTraceSynchronizer {
       const policy = applyRawTraceRequestLogPolicy(config, {
         ...bundle.update,
         ...(standaloneRequestLog ? { allowStandaloneRecord: true } : {})
-      });
+      }, pricingModel);
       const maxBodyBytes = resolveRawTraceBodyLimit(config.observability.requestLogMaxBodyBytes);
       const files = policy.bodyDisposition === "suppress"
         ? { cleanupDirectory: bundle.files.cleanupDirectory, maxBodyBytes }
@@ -1486,7 +1486,8 @@ export type RawTraceRequestLogPolicy = {
 
 export function applyRawTraceRequestLogPolicy(
   config: AppConfig,
-  input: RequestLogRawTraceUpdateInput
+  input: RequestLogRawTraceUpdateInput,
+  pricingModel?: string
 ): RawTraceRequestLogPolicy {
   const outcome = rawTraceRequestOutcome(input.statusCode);
   const configuredBodyCapture = config.observability.requestLogBodyCapture ?? "all";
@@ -1503,7 +1504,7 @@ export function applyRawTraceRequestLogPolicy(
   const policyInput: RequestLogRawTraceUpdateInput = {
     ...input,
     provider: modelRegistryForConfig(config).findProvider(input.provider)?.name ?? input.provider,
-    pricing: providerModelPricingForUsage(config, input.provider, input.model),
+    pricing: providerModelPricingForUsage(config, input.provider, pricingModel ?? input.model),
     bodyCapturePolicy,
     // An upstream trace never owns the final request outcome. Even an HTTP 2xx
     // can be followed by a downstream disconnect or response write failure.
@@ -1532,7 +1533,7 @@ async function recordUsageCaptureFromRawTrace(
   input: RequestLogRawTraceUpdateInput,
   files: RequestLogRawTraceFiles,
   clientVisibleModel?: string
-): Promise<void> {
+): Promise<string | undefined> {
   const method = input.method ?? "POST";
   const path = input.path ?? pathFromUrl(input.url) ?? "/";
   if (!shouldCaptureGatewayUsage(method, path)) {
@@ -1563,6 +1564,7 @@ async function recordUsageCaptureFromRawTrace(
     statusCode: numberValue(input.statusCode) ?? 0,
     upstreamModel
   });
+  return upstreamModel;
 }
 
 async function rawTraceUsageBodyText(
