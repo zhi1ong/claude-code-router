@@ -26,6 +26,7 @@ import {
   ccrRuntimeConfigReloadMessageType
 } from "@ccr/core/gateway/core-runtime/router-plugin-contract";
 import { GatewayRequestPipeline } from "@ccr/core/gateway/request/pipeline";
+import { kimiSearchTarget } from "@ccr/core/gateway/features/kimi-search";
 import { GatewayHttpRequestHandler } from "@ccr/core/gateway/http/request-handler";
 import { gatewayRuntimeConfigRevision } from "@ccr/core/gateway/runtime-config-control";
 import { shouldRestartGatewayForRuntimeConfigChange } from "@ccr/core/gateway/runtime-change";
@@ -735,6 +736,9 @@ function singleGatewayRuntimeBlockers(config: AppConfig, options: SingleGatewayR
   // A conditional core HTTP pre-route cannot safely fall through on 1.0.21.
   if (config.Providers.some((provider) => provider.enabled !== false && provider.enhancedSearch?.enabled)) {
     blockers.push("bailian-enhanced-search");
+  }
+  if (config.Providers.some((provider) => kimiSearchTarget(provider))) {
+    blockers.push("kimi-search");
   }
   if (browserAutomationMcpEnabled(config)) blockers.push("browser-automation-mcp");
   if ((options.hasGatewayRoutes ?? (() => pluginService.hasGatewayRoutes()))()) blockers.push("plugin-gateway-routes");

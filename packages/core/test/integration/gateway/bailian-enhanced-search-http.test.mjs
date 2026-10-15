@@ -187,6 +187,17 @@ test("real gateway routes Claude Code searches through Bailian or Kimi according
     assert.equal((await post(body, key)).status, expected);
   }
   assert.equal(kimiSearches.length, 3, "authentication and profile allowlists are checked before search");
+
+  config.Providers = config.Providers.filter(provider => provider.id === "kimi-official");
+  const kimiOnlyStatus = await gatewayService.start(config);
+  assert.equal(kimiOnlyStatus.state, "running", kimiOnlyStatus.lastError);
+  assert.notEqual(kimiOnlyStatus.endpoint, kimiOnlyStatus.coreEndpoint, "Kimi-only configurations must retain the CCR search pipeline");
+  const kimiOnlyResult = await post({ ...profileQuery, stream: true }, "kimi-profile-key");
+  assert.equal(kimiOnlyResult.status, 200, kimiOnlyResult.text);
+  assert.match(kimiOnlyResult.text, /Sunny from Kimi/);
+  assert.match(kimiOnlyResult.text, /event: message_stop/);
+  assert.equal(kimiSearches.length, 4);
+  assert.equal(searches.length, 12, "Kimi-only configurations never invoke Bailian");
 });
 
 async function readJson(request) {
