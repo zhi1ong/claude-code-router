@@ -27,7 +27,7 @@ import {
 } from "@ccr/core/gateway/features/context-archive-continuation";
 import { isCodexResponsesCompactPath, type ContextArchiveResponseMode } from "@ccr/core/gateway/context-archive/protocol";
 import { adaptRouteRequestBody, restoreRouteRequestBody } from "@ccr/core/routing/protocol-adapter";
-import { executeBailianEnhancedSearchSideQuery, prepareBailianEnhancedSearchSideQuery } from "@ccr/core/gateway/features/bailian-enhanced-search";
+import { executeClaudeCodeWebSearchSideQuery, prepareClaudeCodeWebSearchSideQuery } from "@ccr/core/gateway/features/claude-code-web-search";
 import { reserveApiKeyLimits } from "@ccr/core/gateway/auth/api-key-authorizer";
 import { recordProviderCredentialOutcome } from "@ccr/core/providers/credential-pool";
 import { codexApplyPatchBridgeResponseStream, prepareCodexApplyPatchBridgeRequest } from "@ccr/core/gateway/features/codex-patch-bridge";
@@ -445,7 +445,7 @@ export class GatewayRequestPipeline {
         return;
       }
 
-      const enhancedSearch = prepareBailianEnhancedSearchSideQuery({
+      const webSearch = prepareClaudeCodeWebSearchSideQuery({
         config: activeConfig,
         method,
         path,
@@ -453,23 +453,23 @@ export class GatewayRequestPipeline {
         requestedModel,
         routedModel: effectiveModel
       });
-      if (enhancedSearch) {
+      if (webSearch) {
         const searchStartedAt = Date.now();
         const responseHeaders = new Headers({
-          "x-gateway-target-provider": providerRuntimeId(enhancedSearch.provider)
+          "x-gateway-target-provider": providerRuntimeId(webSearch.provider)
         });
         try {
-          const result = await executeBailianEnhancedSearchSideQuery(enhancedSearch, upstreamAbortController.signal);
+          const result = await executeClaudeCodeWebSearchSideQuery(webSearch, upstreamAbortController.signal);
           for (const [name, value] of Object.entries(result.headers)) {
             responseHeaders.set(name, value);
           }
           routeTrace?.capture({
             durationMs: Date.now() - searchStartedAt,
             kind: "decision",
-            name: "enrichment.bailian-enhanced-search",
+            name: webSearch.backend === "kimi" ? "enrichment.kimi-search" : "enrichment.bailian-enhanced-search",
             phase: "enrichment",
             startedAtMs: searchStartedAt,
-            target: { model: effectiveModel, provider: enhancedSearch.provider.name }
+            target: { model: effectiveModel, provider: webSearch.provider.name }
           });
           if (clientDisconnected || response.destroyed) {
             writeRequestLog(clientClosedRequestStatusCode, responseHeaders, "", false, clientDisconnectMessage);

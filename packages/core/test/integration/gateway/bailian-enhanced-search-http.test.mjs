@@ -15,9 +15,10 @@ before(async () => {
   ({ bailianEnhancedSearchEndpointEnv } = await import("@ccr/core/gateway/features/bailian-enhanced-search/mcp.ts"));
 });
 
-test("real gateway routes only dedicated searches through the selected provider", { timeout: 30000 }, async (t) => {
+test("real gateway routes Claude Code searches through Bailian or Kimi according to the selected provider", { timeout: 30000 }, async (t) => {
   const models = [];
   const searches = [];
+  const kimiSearches = [];
   const upstream = createServer(async (request, response) => {
     const body = await readJson(request);
     models.push(body);
@@ -41,42 +42,64 @@ test("real gateway routes only dedicated searches through the selected provider"
     };
     sendJson(response, 200, { id: body.id, jsonrpc: "2.0", result });
   });
+  const kimiSearch = createServer(async (request, response) => {
+    kimiSearches.push({ path: request.url, headers: request.headers, body: await readJson(request) });
+    sendJson(response, 200, { search_results: [
+      { title: "Kimi weather", url: "https://example.test/weather", snippet: "Sunny from Kimi" },
+      { title: "Other", url: "https://notexample.test/weather" }
+    ] });
+  });
   const previousEntry = process.env.CCR_GATEWAY_ENTRY;
   const previousEndpoint = process.env[bailianEnhancedSearchEndpointEnv];
   t.after(async () => {
     await gatewayService.stop();
-    await Promise.all([close(upstream), close(search)]);
+    await Promise.all([close(upstream), close(search), close(kimiSearch)]);
     for (const [key, value] of [["CCR_GATEWAY_ENTRY", previousEntry], [bailianEnhancedSearchEndpointEnv, previousEndpoint]]) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
   });
-  await Promise.all([listen(upstream), listen(search)]);
+  await Promise.all([listen(upstream), listen(search), listen(kimiSearch)]);
+  const realFetch = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", (input, init) => {
+    const target = String(input);
+    return realFetch(target === "https://api.kimi.com/coding/v1/search"
+      ? url(kimiSearch) + "/coding/v1/search" : input, init);
+  });
   process.env.CCR_GATEWAY_ENTRY = createRequire(path.join(process.cwd(), "package.json")).resolve("@the-next-ai/ai-gateway");
   process.env[bailianEnhancedSearchEndpointEnv] = url(search) + "/mcp";
   const config = createDefaultAppConfig();
   config.APIKEY = "client-key";
   config.APIKEYS = [{ id: "client", key: "client-key", createdAt: new Date(0).toISOString() },
-    { id: "profile:restricted", key: "restricted-key", createdAt: new Date(0).toISOString() }];
+    { id: "profile:restricted", key: "restricted-key", createdAt: new Date(0).toISOString() },
+    { id: "profile:kimi", key: "kimi-profile-key", createdAt: new Date(0).toISOString() },
+    { id: "profile:bailian", key: "bailian-profile-key", createdAt: new Date(0).toISOString() }];
   config.profile.profiles = [{ id: "restricted", enabled: true, agent: "claude-code",
-    model: "Selected/other", availableModels: ["Selected/other"], scope: "ccr" }];
+    model: "Selected/other", availableModels: ["Selected/other"], scope: "ccr" },
+    { id: "kimi", enabled: true, agent: "claude-code", model: "Kimi/kimi-for-coding",
+      availableModels: ["Kimi/kimi-for-coding"], scope: "ccr", routing: { enabled: true, enhancedRoute: true, rules: [] } },
+    { id: "bailian", enabled: true, agent: "claude-code", model: "Selected/kimi-for-coding",
+      availableModels: ["Selected/kimi-for-coding"], scope: "ccr", routing: { enabled: true, enhancedRoute: true, rules: [] } }];
   config.gateway = { enabled: true, host: "127.0.0.1", coreHost: "127.0.0.1", port: await freePort(), corePort: await freePort() };
   config.proxy.upstream.mode = "none";
   config.observability.requestLogs = false;
   config.Router.builtInRules = { "claude-code": { enabled: false }, codex: { enabled: false } };
   config.Router.fallback = { mode: "off", models: [], retryCount: 0 };
   config.Providers = ["First", "Selected"].map(name => ({
-    id: name.toLowerCase(), name, models: ["search", "other"], api_key: "model-key",
+    id: name.toLowerCase(), name, models: ["search", "other", "kimi-for-coding"], api_key: "model-key",
     capabilities: [{ type: "anthropic_messages", baseUrl: url(upstream) }],
     enhancedSearch: { enabled: true, apiKey: "search-" + name }
   }));
+  config.Providers.push({ id: "kimi-official", name: "Kimi", models: ["kimi-for-coding"], api_key: "kimi-upstream-key",
+    capabilities: [{ type: "anthropic_messages", baseUrl: "https://api.kimi.com/coding/" }] });
   const status = await gatewayService.start(config);
   assert.equal(status.state, "running", status.lastError);
   assert.notEqual(status.endpoint, status.coreEndpoint);
 
   async function post(body, key = "client-key") {
     const response = await fetch(status.endpoint + "/v1/messages", {
-      method: "POST", headers: { "content-type": "application/json", "x-api-key": key },
+      method: "POST", headers: { "content-type": "application/json", "x-api-key": key,
+        "user-agent": "claude-code/1.0", cookie: "client-private-cookie", "x-msh-test": "client-header" },
       body: JSON.stringify(body), signal: AbortSignal.timeout(5000)
     });
     return { status: response.status, text: await response.text(), contentType: response.headers.get("content-type") };
@@ -115,6 +138,55 @@ test("real gateway routes only dedicated searches through the selected provider"
     assert.equal((await post(query, key)).status, expected);
     assert.equal(searches.length, 6);
   }
+  const kimiQuery = { ...query, model: "Kimi/kimi-for-coding" };
+  for (const stream of [false, true]) {
+    const result = await post({ ...kimiQuery, stream }, "kimi-profile-key");
+    assert.equal(result.status, 200, result.text);
+    assert.match(result.text, /Sunny from Kimi/);
+    assert.doesNotMatch(result.text, /notexample/);
+    if (stream) {
+      const events = result.text.split("\n\n").filter(Boolean).map(event => JSON.parse(event.split("\ndata: ")[1]));
+      assert.equal(events[0].type, "message_start");
+      assert.equal(events[0].message.model, kimiQuery.model);
+      assert.equal(events.at(-1).type, "message_stop");
+      const blocks = events.filter(event => event.type === "content_block_start").map(event => event.content_block);
+      assert.equal(blocks[1].tool_use_id, blocks[0].id);
+      assert.equal(events.at(-2).delta.stop_reason, "end_turn");
+    } else {
+      const message = JSON.parse(result.text);
+      assert.equal(message.model, kimiQuery.model);
+      assert.equal(message.content[1].tool_use_id, message.content[0].id);
+    }
+  }
+  assert.equal(kimiSearches.length, 2);
+  for (const request of kimiSearches) {
+    assert.equal(request.path, "/coding/v1/search");
+    assert.deepEqual(request.body, { text_query: "Shanghai weather" });
+    assert.equal(request.headers.authorization, "Bearer kimi-upstream-key");
+    assert.equal(request.headers["x-api-key"], undefined);
+    assert.equal(request.headers.cookie, undefined);
+    assert.equal(request.headers["x-msh-test"], undefined);
+  }
+  assert.equal(models.length, 1);
+  assert.equal(searches.length, 6, "Kimi upstream searches never use Bailian");
+  assert.equal((await post({ ...query, model: "Selected/kimi-for-coding" })).status, 200);
+  assert.equal(searches.length, 9, "Bailian-hosted Kimi models still use EnhancedSearch");
+  assert.equal(kimiSearches.length, 2);
+  const profileQuery = { ...query, model: "claude-default" };
+  const kimiProfileResult = await post(profileQuery, "kimi-profile-key");
+  assert.equal(kimiProfileResult.status, 200, kimiProfileResult.text);
+  assert.match(kimiProfileResult.text, /Sunny from Kimi/);
+  assert.equal(JSON.parse(kimiProfileResult.text).model, "claude-default");
+  assert.equal(kimiSearches.length, 3, "Claude aliases route through the authenticated Kimi profile");
+  const bailianProfileResult = await post(profileQuery, "bailian-profile-key");
+  assert.equal(bailianProfileResult.status, 200, bailianProfileResult.text);
+  assert.equal(searches.length, 12, "the same Claude alias uses EnhancedSearch with the Bailian profile");
+  assert.equal(kimiSearches.length, 3);
+  for (const [body, key, expected] of [[kimiQuery, "invalid-key", 401], [kimiQuery, "restricted-key", 403],
+    [query, "kimi-profile-key", 403]]) {
+    assert.equal((await post(body, key)).status, expected);
+  }
+  assert.equal(kimiSearches.length, 3, "authentication and profile allowlists are checked before search");
 });
 
 async function readJson(request) {

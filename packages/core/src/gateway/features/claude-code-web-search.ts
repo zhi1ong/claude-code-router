@@ -7,6 +7,7 @@ import { modelRegistryForConfig, providerRuntimeId } from "@ccr/core/routing/mod
 import { activeProviderCredentials, providerCredentialApiKey, providerCredentialRuntimeId } from "@ccr/core/providers/runtime-topology";
 import { reserveProviderCredentialUsage } from "@ccr/core/providers/credential-pool";
 import { selectProviderCredentials } from "@ccr/core/gateway/upstream/executor";
+import { kimiSearchHttpStatus, kimiSearchTarget, searchKimiWeb } from "@ccr/core/gateway/features/kimi-search";
 
 const sideQueryTimeoutMs = 15_000;
 const maxResults = 8;
@@ -18,7 +19,9 @@ const maxSearchCredentialCooldowns = 1_024;
 const searchCredentialCooldowns = new Map<string, number>();
 
 type DomainFilter = { hostname: string; path?: string[] };
-export type BailianEnhancedSearchSideQueryContext = {
+export type ClaudeCodeWebSearchSideQueryContext = {
+  backend: "bailian" | "kimi";
+  config: Pick<AppConfig, "providerPlugins">;
   provider: GatewayProviderConfig;
   query: string;
   model: string;
@@ -27,7 +30,7 @@ export type BailianEnhancedSearchSideQueryContext = {
   blockedDomains?: DomainFilter[];
   validationError?: string;
 };
-export type BailianEnhancedSearchSideQueryResponse = {
+export type ClaudeCodeWebSearchSideQueryResponse = {
   statusCode: number;
   headers: Record<string, string>;
   body: string;
@@ -35,22 +38,22 @@ export type BailianEnhancedSearchSideQueryResponse = {
 };
 
 /** Prepare only Claude Code's dedicated WebSearch request, after normal routing. */
-export function prepareBailianEnhancedSearchSideQuery(input: {
+export function prepareClaudeCodeWebSearchSideQuery(input: {
   config: AppConfig;
   method: string;
   path: string;
   body: Buffer | undefined;
   routedModel?: string;
   requestedModel?: string;
-}): BailianEnhancedSearchSideQueryContext | undefined {
+}): ClaudeCodeWebSearchSideQueryContext | undefined {
   if (input.method.toUpperCase() !== "POST" || !/^\/v1\/messages\/?$/.test(input.path) || !input.body) {
     return undefined;
   }
-  if (!input.config.Providers.some((provider) => provider.enabled !== false && provider.enhancedSearch?.enabled === true)) {
+  if (!input.config.Providers.some((provider) => searchBackend(provider))) {
     return undefined;
   }
   const routed = input.routedModel === undefined ? undefined : modelRegistryForConfig(input.config).resolve(input.routedModel);
-  if (input.routedModel !== undefined && (routed?.kind !== "provider" || routed.provider.enhancedSearch?.enabled !== true)) {
+  if (input.routedModel !== undefined && (routed?.kind !== "provider" || !searchBackend(routed.provider))) {
     return undefined;
   }
   let body: unknown;
@@ -59,15 +62,19 @@ export function prepareBailianEnhancedSearchSideQuery(input: {
   } catch {
     return undefined;
   }
-  if (!isRecord(body) || !isBailianEnhancedSearchSideQueryBody(body)) {
+  if (!isRecord(body) || !isClaudeCodeWebSearchSideQueryBody(body)) {
     return undefined;
   }
   const resolved = routed ?? modelRegistryForConfig(input.config).resolve(stringValue(body.model));
-  if (resolved?.kind !== "provider" || resolved.provider.enhancedSearch?.enabled !== true) {
+  const backend = resolved?.kind === "provider" ? searchBackend(resolved.provider) : undefined;
+  if (resolved?.kind !== "provider" || !backend) {
     return undefined;
   }
-  const query = normalizeBailianEnhancedSearchQuery(stripClaudeCodeWebSearchQueryPrefix(sideQueryUserText(body))) ?? "";
-  const context: BailianEnhancedSearchSideQueryContext = {
+  const text = stripClaudeCodeWebSearchQueryPrefix(sideQueryUserText(body));
+  const query = backend === "kimi" ? text?.trim() ?? "" : normalizeBailianEnhancedSearchQuery(text) ?? "";
+  const context: ClaudeCodeWebSearchSideQueryContext = {
+    backend,
+    config: input.config,
     provider: resolved.provider,
     query,
     model: input.requestedModel?.trim() || stringValue(body.model) || resolved.model,
@@ -76,7 +83,7 @@ export function prepareBailianEnhancedSearchSideQuery(input: {
   const tool = (body.tools as Record<string, unknown>[])[0];
   try {
     if (!query) {
-      throw new Error("Web search query must contain at least two characters.");
+      throw new Error(backend === "kimi" ? "Web search query must not be empty." : "Web search query must contain at least two characters.");
     }
     if (tool.allowed_domains !== undefined && tool.blocked_domains !== undefined) {
       throw new Error("Use either allowed_domains or blocked_domains, not both.");
@@ -93,21 +100,25 @@ export function prepareBailianEnhancedSearchSideQuery(input: {
 }
 
 /** Execute a bounded reply; the caller owns HTTP lifecycle, auth, limits and logs. */
-export async function executeBailianEnhancedSearchSideQuery(
-  context: BailianEnhancedSearchSideQueryContext,
+export async function executeClaudeCodeWebSearchSideQuery(
+  context: ClaudeCodeWebSearchSideQueryContext,
   signal?: AbortSignal
-): Promise<BailianEnhancedSearchSideQueryResponse> {
+): Promise<ClaudeCodeWebSearchSideQueryResponse> {
   signal?.throwIfAborted();
   if (context.validationError) {
     return sideQueryError(400, "invalid_request_error", context.validationError);
   }
-  const credential = searchCredential(context.provider);
+  const label = context.backend === "kimi" ? "Kimi web search" : "Bailian enhanced web search";
+  const credential = searchCredential(context.provider, context.backend);
   if (!credential) {
-    return sideQueryError(503, "api_error", "Bailian enhanced web search has no available API key.");
+    return sideQueryError(503, "api_error", `${label} has no available API key.`);
   }
   let results: BrowserWebSearchProtocolResult[];
   try {
-    results = (await searchBailianEnhancedWeb({ apiKey: credential.apiKey, query: context.query, signal, timeoutMs: sideQueryTimeoutMs }))
+    results = (context.backend === "kimi"
+      ? await searchKimiWeb({ config: context.config, provider: context.provider, apiKey: credential.apiKey,
+        credentialName: credential.internalName, query: context.query, signal, timeoutMs: sideQueryTimeoutMs })
+      : await searchBailianEnhancedWeb({ apiKey: credential.apiKey, query: context.query, signal, timeoutMs: sideQueryTimeoutMs }))
       .filter((result) => resultMatchesDomains(result, context))
       .slice(0, maxResults)
       .map((result) => ({
@@ -120,7 +131,7 @@ export async function executeBailianEnhancedSearchSideQuery(
     if (error instanceof Error && error.name === "AbortError") {
       throw error;
     }
-    const status = bailianEnhancedSearchHttpStatus(error);
+    const status = context.backend === "kimi" ? kimiSearchHttpStatus(error) : bailianEnhancedSearchHttpStatus(error);
     if (credential.cooldownKey && (status === 401 || status === 403 || status === 429)) {
       // Search refusals must not mark the normal model credential unhealthy.
       if (searchCredentialCooldowns.size >= maxSearchCredentialCooldowns) {
@@ -130,8 +141,8 @@ export async function executeBailianEnhancedSearchSideQuery(
       searchCredentialCooldowns.set(credential.cooldownKey, Date.now() + searchCredentialCooldownMs);
     }
     return error instanceof Error && error.name === "TimeoutError"
-      ? sideQueryError(504, "api_error", "Bailian enhanced web search timed out.")
-      : sideQueryError(502, "api_error", "Bailian enhanced web search failed.");
+      ? sideQueryError(504, "api_error", `${label} timed out.`)
+      : sideQueryError(502, "api_error", `${label} failed.`);
   }
   signal?.throwIfAborted();
   const message = buildSideQueryMessage(context.model, context.query, results);
@@ -144,7 +155,7 @@ export async function executeBailianEnhancedSearchSideQuery(
   };
 }
 
-export function isBailianEnhancedSearchSideQueryBody(body: Record<string, unknown>): boolean {
+export function isClaudeCodeWebSearchSideQueryBody(body: Record<string, unknown>): boolean {
   if (!Array.isArray(body.tools) || body.tools.length !== 1) {
     return false;
   }
@@ -188,8 +199,16 @@ export function stripClaudeCodeWebSearchQueryPrefix(query: string | undefined): 
   return query?.trimStart().replace(claudeCodeWebSearchQueryPrefix, "");
 }
 
-function searchCredential(provider: GatewayProviderConfig): { apiKey: string; cooldownKey?: string } | undefined {
-  const dedicated = provider.enhancedSearch?.apiKey?.trim();
+function searchBackend(provider: GatewayProviderConfig): ClaudeCodeWebSearchSideQueryContext["backend"] | undefined {
+  if (provider.enabled === false) return undefined;
+  if (kimiSearchTarget(provider)) return "kimi";
+  return provider.enhancedSearch?.enabled === true ? "bailian" : undefined;
+}
+
+function searchCredential(provider: GatewayProviderConfig, backend: ClaudeCodeWebSearchSideQueryContext["backend"]): {
+  apiKey: string; cooldownKey?: string; internalName?: string;
+} | undefined {
+  const dedicated = backend === "bailian" ? provider.enhancedSearch?.apiKey?.trim() : undefined;
   if (dedicated) {
     return { apiKey: dedicated };
   }
@@ -201,10 +220,13 @@ function searchCredential(provider: GatewayProviderConfig): { apiKey: string; co
       !searchCredentialCooldowns.has(searchCredentialCooldownKey(provider, credential))
     );
     const usage = { totalTokens: 0, imageCount: 0 };
-    const selected = selectProviderCredentials(provider, "anthropic_messages", credentials, usage);
+    const protocol = backend === "kimi" ? kimiSearchTarget(provider)?.protocol : "anthropic_messages";
+    if (!protocol) return undefined;
+    const selected = selectProviderCredentials(provider, protocol, credentials, usage);
     const credential = selected.credentials[0]?.credential;
     return !selected.saturated && credential && reserveProviderCredentialUsage(provider, credential, usage)
-      ? { apiKey: providerCredentialApiKey(credential), cooldownKey: searchCredentialCooldownKey(provider, credential) }
+      ? { apiKey: providerCredentialApiKey(credential), cooldownKey: searchCredentialCooldownKey(provider, credential),
+        internalName: selected.credentials[0].internalName }
       : undefined;
   }
   const apiKey = provider.apikey?.trim() || provider.apiKey?.trim() || provider.api_key?.trim();
@@ -256,7 +278,7 @@ function matchesDomainPath(pathname: string, parts: string[]): boolean {
   return true;
 }
 
-function resultMatchesDomains(result: BrowserWebSearchProtocolResult, context: BailianEnhancedSearchSideQueryContext): boolean {
+function resultMatchesDomains(result: BrowserWebSearchProtocolResult, context: ClaudeCodeWebSearchSideQueryContext): boolean {
   let url: URL;
   try {
     url = new URL(result.url);
@@ -327,6 +349,6 @@ function sideQuerySse(message: ReturnType<typeof buildSideQueryMessage>): string
   return events.join("");
 }
 
-function sideQueryError(statusCode: number, type: string, message: string): BailianEnhancedSearchSideQueryResponse {
+function sideQueryError(statusCode: number, type: string, message: string): ClaudeCodeWebSearchSideQueryResponse {
   return { statusCode, headers: { "content-type": "application/json; charset=utf-8" }, body: JSON.stringify({ error: { message, type }, type: "error" }), error: message };
 }
