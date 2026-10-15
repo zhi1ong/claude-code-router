@@ -23,6 +23,23 @@ test("single gateway runtime falls back when Media Tools need CCR HTTP routes", 
   assert.ok(singleGatewayRuntimeBlockersForTest(config).includes("media-tools"));
 });
 
+test("only an enabled official Kimi upstream retains the CCR search pipeline", () => {
+  const config = createDefaultAppConfig();
+  config.Providers = [];
+  const needsSearchPipeline = () => singleGatewayRuntimeBlockersForTest(config, pluginCapableOptions()).includes("kimi-search");
+  assert.equal(needsSearchPipeline(), false);
+  const provider = { name: "Kimi", models: ["kimi-for-coding"], capabilities: [
+    { type: "anthropic_messages", baseUrl: "https://api.kimi.com/coding/" }
+  ] };
+  config.Providers = [provider];
+  assert.equal(needsSearchPipeline(), true);
+  provider.enabled = false;
+  assert.equal(needsSearchPipeline(), false);
+  provider.enabled = true;
+  provider.capabilities[0].baseUrl = "https://example.maas.aliyuncs.com/apps/anthropic";
+  assert.equal(needsSearchPipeline(), false, "a Kimi name or model on another upstream must not change runtime selection");
+});
+
 test("single gateway runtime falls back when browser automation MCP needs Electron routing", () => {
   const config = createDefaultAppConfig();
   config.toolHub.enabled = true;
