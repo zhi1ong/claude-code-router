@@ -7,6 +7,7 @@
 | 功能组 | 分支 |
 | --- | --- |
 | 百炼增强 | `feat/bailian-enhancements-v2` |
+| Claude Code WebSearch 的 Kimi 官方搜索适配 | `feat/claude-kimi-search` |
 | Claude 默认模型列表、Anthropic effort 兼容 | `feat/claude-default-model-list-v2` |
 | API Key/Profile 关联、日志与 Usage 归因 | `feat/profile-logs-v2` |
 | 网页管理令牌认证 | `feat/web-management-token-login` |

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { searchBailianEnhancedWeb } from "@ccr/core/gateway/features/bailian-enhanced-search/mcp.ts";
-import { executeBailianEnhancedSearchSideQuery } from "@ccr/core/gateway/features/bailian-enhanced-search/side-query.ts";
+import { executeClaudeCodeWebSearchSideQuery } from "@ccr/core/gateway/features/claude-code-web-search.ts";
 import { readProviderCredentialCooldown } from "@ccr/core/providers/credential-pool.ts";
 
 const input = { apiKey: "search-secret", endpoint: "http://127.0.0.1/mcp", query: "Shanghai weather", timeoutMs: 1000 };
@@ -123,8 +123,8 @@ test("search refusals isolate pool keys until expiry or rotation without cooling
       return body.method === "notifications/initialized" ? new Response(null, { status: 202 })
         : rpc(body.id, body.method === "initialize" ? {} : tool());
     });
-    const context = { provider, query: input.query, model: "search-model", stream: false };
-    const run = () => executeBailianEnhancedSearchSideQuery(context);
+    const context = { backend: "bailian", config: {}, provider, query: input.query, model: "search-model", stream: false };
+    const run = () => executeClaudeCodeWebSearchSideQuery(context);
     assert.equal((await run()).statusCode, 502);
     assert.equal(calls.length, 3, "the failed search is not replayed");
     assert.equal(readProviderCredentialCooldown(provider, first), undefined);
