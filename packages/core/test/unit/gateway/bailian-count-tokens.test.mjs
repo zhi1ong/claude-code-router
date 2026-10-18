@@ -8,6 +8,8 @@ import { GatewayHttpRequestHandler } from "@ccr/core/gateway/http/request-handle
 
 const payload = {
   model: "claude-count-alias",
+  thinking: { type: "adaptive", display: "updates" },
+  output_config: { effort: "high" },
   system: [{ type: "text", text: "Be concise.", cache_control: { type: "ephemeral" } }],
   messages: [{ role: "user", content: [{ type: "text", text: "Hello" }] }],
   tools: [{ name: "get_time", input_schema: { type: "object", properties: {} } }],
@@ -102,13 +104,14 @@ test("both count endpoints send mapped Bailian requests with upstream credential
     assert.equal(url, "https://ws-test.cn-beijing.maas.aliyuncs.com/apps/anthropic/v1/messages/count_tokens");
     assert.equal(init.method, "POST");
     assert.equal(init.redirect, "manual");
-    assert.deepEqual(JSON.parse(init.body), { ...payload, model: "qwen3.7-plus" });
+    assert.deepEqual(JSON.parse(init.body), { ...payload, model: "qwen3.7-plus", thinking: { ...payload.thinking, type: "enabled" } });
     assert.equal(init.headers["x-api-key"], "provider-key");
     assert.equal(init.headers["anthropic-beta"], "future-feature");
     assert.equal(init.headers["x-client-custom"], "preserve");
     for (const name of ["authorization", "cookie", "x-auth-api-key-id", "x-ccr-routed-model"]) assert.equal(init.headers[name], undefined, name);
   }
   assert.equal(payload.model, "claude-count-alias");
+  assert.equal(payload.thinking.type, "adaptive");
 });
 
 test("non-Bailian and OpenAI-only providers retain local estimation", async (t) => {

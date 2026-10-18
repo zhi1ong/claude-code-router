@@ -3,6 +3,7 @@ import { isGatewayProviderEnabled, type ApiKeyConfig, type AppConfig, type Gatew
 import type { ClaudeCodeRouterPlugin } from "@ccr/core/gateway/claude-code-router-plugin";
 import { ccrRouteHeaderNames } from "@ccr/core/gateway/core-runtime/router-plugin-contract";
 import { mergeUpstreamProviderHeaders } from "@ccr/core/gateway/core-runtime/upstream-header-sanitizer";
+import { isBailianAnthropicBaseUrl, normalizeBailianThinking } from "@ccr/core/gateway/features/bailian-thinking";
 import { filteredResponseHeaders, forwardHeaders, stripLocalGatewayAuthHeaders } from "@ccr/core/gateway/http/io";
 import { isRecord } from "@ccr/core/gateway/internal/value";
 import { selectProviderCredentials } from "@ccr/core/gateway/upstream/executor";
@@ -87,8 +88,9 @@ export async function forwardBailianCountTokens(input: {
   if (input.request?.aborted || input.response?.destroyed) abort();
   const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(countTokensTimeoutMs)]);
   try {
-    const response = await fetchWithSystemProxy(`${provider.baseurl.replace(/\/+$/, "")}/v1/messages/count_tokens`, {
-      body: JSON.stringify({ ...routed.body, model: target.model }),
+    const url = `${provider.baseurl.replace(/\/+$/, "")}/v1/messages/count_tokens`;
+    const response = await fetchWithSystemProxy(url, {
+      body: JSON.stringify(normalizeBailianThinking({ ...routed.body, model: target.model }, url)),
       headers: upstreamHeaders,
       method: "POST",
       redirect: "manual",
@@ -122,16 +124,6 @@ function isNativeBailianProvider(provider: GatewayProviderConfig): boolean {
   const baseUrl = providerCapabilityForClientProtocol(provider, "anthropic_messages")?.baseUrl ||
     provider.baseurl || provider.baseUrl || provider.api_base_url || "";
   return isBailianAnthropicBaseUrl(normalizeProviderBaseUrl(baseUrl, "anthropic_messages"));
-}
-
-export function isBailianAnthropicBaseUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return url.protocol === "https:" && !url.username && !url.password &&
-      (url.hostname === "dashscope.aliyuncs.com" || url.hostname === "dashscope-intl.aliyuncs.com" ||
-        url.hostname.endsWith(".dashscope.aliyuncs.com") || url.hostname.endsWith(".maas.aliyuncs.com")) &&
-      url.pathname.replace(/\/+$/, "") === "/apps/anthropic";
-  } catch { return false; }
 }
 
 async function readCountTokensResponse(response: Response): Promise<Buffer> {
