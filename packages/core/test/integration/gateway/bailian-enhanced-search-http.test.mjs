@@ -15,7 +15,7 @@ before(async () => {
   ({ bailianEnhancedSearchEndpointEnv } = await import("@ccr/core/gateway/features/bailian-enhanced-search/mcp.ts"));
 });
 
-test("real gateway routes Claude Code searches through Bailian or Kimi according to the selected provider", { timeout: 30000 }, async (t) => {
+test("real gateway uses the Claude Code profile default for search independently of the active model", { timeout: 30000 }, async (t) => {
   const models = [];
   const searches = [];
   const kimiSearches = [];
@@ -73,13 +73,18 @@ test("real gateway routes Claude Code searches through Bailian or Kimi according
   config.APIKEYS = [{ id: "client", key: "client-key", createdAt: new Date(0).toISOString() },
     { id: "profile:restricted", key: "restricted-key", createdAt: new Date(0).toISOString() },
     { id: "profile:kimi", key: "kimi-profile-key", createdAt: new Date(0).toISOString() },
-    { id: "profile:bailian", key: "bailian-profile-key", createdAt: new Date(0).toISOString() }];
+    { id: "profile:bailian", key: "bailian-profile-key", createdAt: new Date(0).toISOString() },
+    { id: "profile:vertex", key: "vertex-profile-key", createdAt: new Date(0).toISOString() }];
   config.profile.profiles = [{ id: "restricted", enabled: true, agent: "claude-code",
     model: "Selected/other", availableModels: ["Selected/other"], scope: "ccr" },
     { id: "kimi", enabled: true, agent: "claude-code", model: "Kimi/kimi-for-coding",
-      availableModels: ["Kimi/kimi-for-coding"], scope: "ccr", routing: { enabled: true, enhancedRoute: true, rules: [] } },
+      opusModel: "Vertex/gemini-4-argon", claudeDefaultModelList: true,
+      availableModels: ["Kimi/kimi-for-coding", "Vertex/gemini-4-argon"], scope: "ccr", routing: { enabled: true, enhancedRoute: true, rules: [] } },
     { id: "bailian", enabled: true, agent: "claude-code", model: "Selected/kimi-for-coding",
-      availableModels: ["Selected/kimi-for-coding"], scope: "ccr", routing: { enabled: true, enhancedRoute: true, rules: [] } }];
+      opusModel: "Vertex/gemini-4-argon", claudeDefaultModelList: true,
+      availableModels: ["Selected/kimi-for-coding", "Vertex/gemini-4-argon"], scope: "ccr", routing: { enabled: true, enhancedRoute: true, rules: [] } },
+    { id: "vertex", enabled: true, agent: "claude-code", model: "Vertex/gemini-4-argon",
+      availableModels: ["Selected/kimi-for-coding", "Vertex/gemini-4-argon"], scope: "ccr" }];
   config.gateway = { enabled: true, host: "127.0.0.1", coreHost: "127.0.0.1", port: await freePort(), corePort: await freePort() };
   config.proxy.upstream.mode = "none";
   config.observability.requestLogs = false;
@@ -92,6 +97,8 @@ test("real gateway routes Claude Code searches through Bailian or Kimi according
   }));
   config.Providers.push({ id: "kimi-official", name: "Kimi", models: ["kimi-for-coding"], api_key: "kimi-upstream-key",
     capabilities: [{ type: "anthropic_messages", baseUrl: "https://api.kimi.com/coding/" }] });
+  config.Providers.push({ id: "vertex", name: "Vertex", models: ["gemini-4-argon"], api_key: "vertex-key",
+    capabilities: [{ type: "anthropic_messages", baseUrl: url(upstream) }] });
   const status = await gatewayService.start(config);
   assert.equal(status.state, "running", status.lastError);
   assert.notEqual(status.endpoint, status.coreEndpoint);
@@ -188,6 +195,45 @@ test("real gateway routes Claude Code searches through Bailian or Kimi according
   }
   assert.equal(kimiSearches.length, 3, "authentication and profile allowlists are checked before search");
 
+  const argonQuery = { ...query, model: "Vertex/gemini-4-argon" };
+  for (const key of ["bailian-profile-key", "kimi-profile-key"]) {
+    for (const [model, stream] of [[argonQuery.model, false], [argonQuery.model, true],
+      ["claude-opus-4-6", false], ["claude-opus-4-6", true]]) {
+      const beforeBailian = searches.length;
+      const beforeKimi = kimiSearches.length;
+      const beforeModels = models.length;
+      const result = await post({ ...argonQuery, model, stream }, key);
+      assert.equal(result.status, 200, result.text);
+      assert.equal(models.length, beforeModels, "Argon searches use the profile search backend without a model call");
+      if (key === "bailian-profile-key") {
+        assert.equal(searches.length, beforeBailian + 3);
+        assert.equal(searches.at(-1).authorization, "Bearer search-Selected");
+        assert.equal(kimiSearches.length, beforeKimi);
+      } else {
+        assert.equal(kimiSearches.length, beforeKimi + 1);
+        assert.match(result.text, /Sunny from Kimi/);
+        assert.equal(searches.length, beforeBailian);
+      }
+      if (stream) {
+        const events = result.text.split("\n\n").filter(Boolean).map(event => JSON.parse(event.split("\ndata: ")[1]));
+        assert.equal(events[0].message.model, model);
+        assert.equal(events.at(-1).type, "message_stop");
+      } else {
+        assert.equal(JSON.parse(result.text).model, model);
+      }
+    }
+  }
+  const beforeOrdinaryBailian = searches.length;
+  const beforeOrdinaryKimi = kimiSearches.length;
+  const ordinaryArgon = await post({ ...ordinary, model: argonQuery.model, tools: query.tools }, "bailian-profile-key");
+  assert.equal(ordinaryArgon.status, 200, ordinaryArgon.text);
+  assert.equal(models.at(-1).model, "gemini-4-argon", "ordinary conversations retain the active model");
+  const nativeSearch = await post({ ...query, model: "Selected/kimi-for-coding" }, "vertex-profile-key");
+  assert.equal(nativeSearch.status, 200, nativeSearch.text);
+  assert.equal(models.at(-1).model, "gemini-4-argon", "a default without a CCR search backend uses its native upstream");
+  assert.equal(searches.length, beforeOrdinaryBailian);
+  assert.equal(kimiSearches.length, beforeOrdinaryKimi);
+
   config.Providers = config.Providers.filter(provider => provider.id === "kimi-official");
   const kimiOnlyStatus = await gatewayService.start(config);
   assert.equal(kimiOnlyStatus.state, "running", kimiOnlyStatus.lastError);
@@ -196,8 +242,8 @@ test("real gateway routes Claude Code searches through Bailian or Kimi according
   assert.equal(kimiOnlyResult.status, 200, kimiOnlyResult.text);
   assert.match(kimiOnlyResult.text, /Sunny from Kimi/);
   assert.match(kimiOnlyResult.text, /event: message_stop/);
-  assert.equal(kimiSearches.length, 4);
-  assert.equal(searches.length, 12, "Kimi-only configurations never invoke Bailian");
+  assert.equal(kimiSearches.length, beforeOrdinaryKimi + 1);
+  assert.equal(searches.length, beforeOrdinaryBailian, "Kimi-only configurations never invoke Bailian");
 });
 
 async function readJson(request) {

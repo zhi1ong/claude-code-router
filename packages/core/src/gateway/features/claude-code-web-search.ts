@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { AppConfig, GatewayProviderConfig, ProviderCredentialConfig } from "@ccr/core/contracts/app";
+import type { AppConfig, GatewayProviderConfig, ProfileConfig, ProviderCredentialConfig } from "@ccr/core/contracts/app";
+import { parseJsonObjectSafe, serializeJsonBodyWithModel } from "@ccr/core/gateway/http/body";
 import { isRecord, stringValue } from "@ccr/core/gateway/internal/value";
 import type { BrowserWebSearchProtocolResult } from "@ccr/core/gateway/internal/shared";
 import { bailianEnhancedSearchHttpStatus, normalizeBailianEnhancedSearchQuery, searchBailianEnhancedWeb } from "@ccr/core/gateway/features/bailian-enhanced-search/mcp";
-import { modelRegistryForConfig, providerRuntimeId } from "@ccr/core/routing/model-registry";
+import { modelRegistryForConfig, normalizeRouteSelector, providerRuntimeId } from "@ccr/core/routing/model-registry";
 import { activeProviderCredentials, providerCredentialApiKey, providerCredentialRuntimeId } from "@ccr/core/providers/runtime-topology";
 import { reserveProviderCredentialUsage } from "@ccr/core/providers/credential-pool";
 import { selectProviderCredentials } from "@ccr/core/gateway/upstream/executor";
@@ -36,6 +37,25 @@ export type ClaudeCodeWebSearchSideQueryResponse = {
   body: string;
   error?: string;
 };
+
+/** Route dedicated searches to the authenticated Claude Code profile's default model. */
+export function prepareClaudeCodeWebSearchProfileRequest(input: {
+  method: string;
+  path: string;
+  body: Buffer | undefined;
+  profile: ProfileConfig | undefined;
+}): { body: Buffer; routedModel: string } | undefined {
+  if (input.profile?.agent !== "claude-code" || !input.profile.enabled ||
+      input.method.toUpperCase() !== "POST" || !/^\/v1\/messages\/?$/.test(input.path)) {
+    return undefined;
+  }
+  const model = normalizeRouteSelector(input.profile.model);
+  const body = parseJsonObjectSafe(input.body);
+  if (!model || !body || !isClaudeCodeWebSearchSideQueryBody(body) || body.model === model) {
+    return undefined;
+  }
+  return { body: serializeJsonBodyWithModel(body, model), routedModel: model };
+}
 
 /** Prepare only Claude Code's dedicated WebSearch request, after normal routing. */
 export function prepareClaudeCodeWebSearchSideQuery(input: {

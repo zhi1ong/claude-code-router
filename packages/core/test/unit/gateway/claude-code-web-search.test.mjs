@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createDefaultAppConfig } from "@ccr/core/config/default-config.ts";
-import { executeClaudeCodeWebSearchSideQuery, prepareClaudeCodeWebSearchSideQuery } from "@ccr/core/gateway/features/claude-code-web-search.ts";
+import { executeClaudeCodeWebSearchSideQuery, prepareClaudeCodeWebSearchProfileRequest, prepareClaudeCodeWebSearchSideQuery } from "@ccr/core/gateway/features/claude-code-web-search.ts";
 import { kimiSearchTarget, searchKimiWeb } from "@ccr/core/gateway/features/kimi-search.ts";
 import { readProviderCredentialCooldown, reserveProviderCredentialUsage } from "@ccr/core/providers/credential-pool.ts";
 
@@ -25,6 +25,25 @@ function configFor(provider = kimi) {
   config.providerPlugins = [];
   return config;
 }
+
+test("profile default search routing only applies to enabled Claude Code profiles and dedicated searches", () => {
+  const profile = { agent: "claude-code", enabled: true, model: "Bailian/search" };
+  const input = { method: "POST", path: "/v1/messages", body: Buffer.from(JSON.stringify(query)), profile };
+  for (const overrides of [
+    { profile: undefined },
+    { profile: { ...profile, agent: "codex" } },
+    { profile: { ...profile, enabled: false } },
+    { profile: { ...profile, model: "" } },
+    { method: "GET" },
+    { path: "/v1/messages/count_tokens" },
+    { body: undefined },
+    { body: Buffer.from("invalid JSON") },
+    { body: Buffer.from(JSON.stringify({ ...query, messages: [{ role: "user", content: "hello" }] })) },
+    { body: Buffer.from(JSON.stringify({ ...query, tools: [...query.tools, { name: "Read", input_schema: {} }] })) }
+  ]) {
+    assert.equal(prepareClaudeCodeWebSearchProfileRequest({ ...input, ...overrides }), undefined);
+  }
+});
 
 test("search backend follows the routed upstream, including Bailian-hosted Kimi models", () => {
   const config = configFor();
