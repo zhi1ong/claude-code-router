@@ -27,7 +27,7 @@ import {
 } from "@ccr/core/gateway/features/context-archive-continuation";
 import { isCodexResponsesCompactPath, type ContextArchiveResponseMode } from "@ccr/core/gateway/context-archive/protocol";
 import { adaptRouteRequestBody, restoreRouteRequestBody } from "@ccr/core/routing/protocol-adapter";
-import { executeClaudeCodeWebSearchSideQuery, prepareClaudeCodeWebSearchSideQuery } from "@ccr/core/gateway/features/claude-code-web-search";
+import { executeClaudeCodeWebSearchSideQuery, prepareClaudeCodeWebSearchProfileRequest, prepareClaudeCodeWebSearchSideQuery } from "@ccr/core/gateway/features/claude-code-web-search";
 import { reserveApiKeyLimits } from "@ccr/core/gateway/auth/api-key-authorizer";
 import { recordProviderCredentialOutcome } from "@ccr/core/providers/credential-pool";
 import { codexApplyPatchBridgeResponseStream, prepareCodexApplyPatchBridgeRequest } from "@ccr/core/gateway/features/codex-patch-bridge";
@@ -430,8 +430,15 @@ export class GatewayRequestPipeline {
       }
 
       routeFallback = profileAllowedRouteFallback(activeConfig, authenticatedProfile, routeFallback);
-      const effectiveModel = routedModel ?? requestLogRequestedModel(bodyToForward ?? requestBody, path);
-      const deniedModel = profileDeniedModel(activeConfig, authenticatedProfile, modelBeforeRouting, effectiveModel);
+      let effectiveModel = routedModel ?? requestLogRequestedModel(bodyToForward ?? requestBody, path);
+      const webSearchProfileStartedAt = Date.now();
+      const webSearchProfileRequest = prepareClaudeCodeWebSearchProfileRequest({
+        method, path, body: bodyToForward, profile: authenticatedProfile
+      });
+      const deniedModel = profileDeniedModel(activeConfig, authenticatedProfile, modelBeforeRouting, effectiveModel) ??
+        (webSearchProfileRequest
+          ? profileDeniedModel(activeConfig, authenticatedProfile, modelBeforeRouting, webSearchProfileRequest.routedModel)
+          : undefined);
       if (deniedModel) {
         sendJson(response, 403, {
           error: {
@@ -440,6 +447,23 @@ export class GatewayRequestPipeline {
           }
         });
         return;
+      }
+      if (webSearchProfileRequest) {
+        bodyToForward = webSearchProfileRequest.body;
+        routedModel = effectiveModel = webSearchProfileRequest.routedModel;
+        headers[ccrRoutedModelHeader] = sanitizeHeaderValue(routedModel);
+        routeTrace?.capture({
+          changes: [
+            { after: routedModel, operation: "replace", path: "/body/model", scope: "body" },
+            { after: headers[ccrRoutedModelHeader], operation: "add", path: `/headers/${ccrRoutedModelHeader}`, scope: "headers" }
+          ],
+          durationMs: Date.now() - webSearchProfileStartedAt,
+          kind: "mutation",
+          name: "claude-code.web-search-default-model",
+          phase: "routing",
+          startedAtMs: webSearchProfileStartedAt,
+          target: { model: routedModel }
+        });
       }
       if (!reserveApiKeyLimits(apiKey, request, response, bodyToForward)) {
         return;
