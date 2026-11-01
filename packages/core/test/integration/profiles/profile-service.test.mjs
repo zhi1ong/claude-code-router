@@ -1402,7 +1402,7 @@ test("profile service writes a Grok CLI wrapper that points model discovery and 
   assert.equal(existsSync(path.join(profileGrokHome, "auth.json")), false);
 });
 
-test("profile service writes a multi-model Kimi CLI home that points inference to CCR", { skip: !process.env.CCR_INTERNAL_HOME_DIR }, async () => {
+test("profile service points Kimi inference and standalone search to CCR while preserving source services", { skip: !process.env.CCR_INTERNAL_HOME_DIR }, async () => {
   const profileId = "kimi-gateway-test";
   const sourceKimiHome = path.join(process.env.CCR_INTERNAL_HOME_DIR, ".kimi-code");
   const sourceKimiConfig = path.join(sourceKimiHome, "config.toml");
@@ -1423,6 +1423,14 @@ test("profile service writes a multi-model Kimi CLI home that points inference t
     "",
     "[thinking]",
     "enabled = false",
+    "",
+    "[services.moonshot_search]",
+    'base_url = "https://source.example/search"',
+    'api_key = "source-search-key"',
+    'oauth = { storage = "file", key = "oauth/source" }',
+    "",
+    "[services.moonshot_fetch]",
+    'base_url = "https://source.example/fetch"',
     ""
   ].join("\n"));
   const config = createDefaultAppConfig();
@@ -1494,6 +1502,8 @@ test("profile service writes a multi-model Kimi CLI home that points inference t
       env: {
         CCR_KIMI_BIN: "/custom/bin/kimi",
         KIMI_MODEL_BASE_URL: "https://ignored.example/v1",
+        KIMI_WEB_SEARCH_BASE_URL: "https://ignored.example/search",
+        KIMI_WEB_SEARCH_API_KEY: "ignored-search-key",
         USER_VALUE: "kept"
       },
       id: profileId,
@@ -1519,6 +1529,10 @@ test("profile service writes a multi-model Kimi CLI home that points inference t
   assert.match(content, /USER_VALUE.*kept/);
   assert.match(content, /NO_PROXY.*127\.0\.0\.1,localhost,::1/);
   assert.match(content, /\/custom\/bin\/kimi/);
+  assert.match(content, new RegExp(`KIMI_WEB_SEARCH_BASE_URL.*http://127\\.0\\.0\\.1:${config.gateway.port}/v1/search`));
+  assert.match(content, /KIMI_WEB_SEARCH_API_KEY.*ccr-kimi-profile-test/);
+  assert.equal(content.includes("ignored-search-key"), false);
+  assert.equal(content.includes("https://ignored.example/search"), false);
   assert.equal(content.includes("https://ignored.example/v1"), false);
   assert.match(profileConfigContent, /default_model = "Provider\/model"/);
   assert.match(profileConfigContent, /\[providers\."claude-code-router"\]/);
@@ -1533,6 +1547,8 @@ test("profile service writes a multi-model Kimi CLI home that points inference t
   assert.match(profileConfigContent, /display_name = "Provider \/ Fast Model"/);
   assert.match(profileConfigContent, /telemetry = false/);
   assert.match(profileConfigContent, /\[thinking\]/);
+  assert.match(profileConfigContent, /\[services\.moonshot_search\]\nbase_url = "https:\/\/source\.example\/search"\napi_key = "source-search-key"\noauth = /);
+  assert.match(profileConfigContent, /\[services\.moonshot_fetch\]\nbase_url = "https:\/\/source\.example\/fetch"/);
   assert.equal(profileConfigContent.includes("original-key"), false);
   assert.equal(readFileSync(sourceKimiConfig, "utf8").includes("original-key"), true);
   assert.equal(existsSync(path.join(profileKimiHome, "sessions")), true);

@@ -28,6 +28,7 @@ import {
 import { isCodexResponsesCompactPath, type ContextArchiveResponseMode } from "@ccr/core/gateway/context-archive/protocol";
 import { adaptRouteRequestBody, restoreRouteRequestBody } from "@ccr/core/routing/protocol-adapter";
 import { executeClaudeCodeWebSearchSideQuery, prepareClaudeCodeWebSearchProfileRequest, prepareClaudeCodeWebSearchSideQuery } from "@ccr/core/gateway/features/claude-code-web-search";
+import { executeKimiClientSearchRequest, prepareKimiClientSearchRequest } from "@ccr/core/gateway/features/kimi-client-search";
 import { reserveApiKeyLimits } from "@ccr/core/gateway/auth/api-key-authorizer";
 import { recordProviderCredentialOutcome } from "@ccr/core/providers/credential-pool";
 import { codexApplyPatchBridgeResponseStream, prepareCodexApplyPatchBridgeRequest } from "@ccr/core/gateway/features/codex-patch-bridge";
@@ -435,6 +436,19 @@ export class GatewayRequestPipeline {
       const webSearchProfileRequest = prepareClaudeCodeWebSearchProfileRequest({
         method, path, body: bodyToForward, profile: authenticatedProfile
       });
+      const kimiSearch = prepareKimiClientSearchRequest({
+        config: activeConfig, method, path, body: bodyToForward, profile: authenticatedProfile
+      });
+      if (kimiSearch?.model) {
+        routedModel = effectiveModel = kimiSearch.model;
+        headers[ccrRoutedModelHeader] = sanitizeHeaderValue(routedModel);
+        routeTrace?.capture({
+          kind: "decision",
+          name: "kimi-client.web-search-default-model",
+          phase: "routing",
+          target: { model: routedModel, provider: kimiSearch.search?.provider.name }
+        });
+      }
       const deniedModel = profileDeniedModel(activeConfig, authenticatedProfile, modelBeforeRouting, effectiveModel) ??
         (webSearchProfileRequest
           ? profileDeniedModel(activeConfig, authenticatedProfile, modelBeforeRouting, webSearchProfileRequest.routedModel)
@@ -477,23 +491,27 @@ export class GatewayRequestPipeline {
         requestedModel,
         routedModel: effectiveModel
       });
-      if (webSearch) {
+      if (webSearch || kimiSearch) {
         const searchStartedAt = Date.now();
-        const responseHeaders = new Headers({
-          "x-gateway-target-provider": providerRuntimeId(webSearch.provider)
-        });
+        const search = kimiSearch?.search ?? webSearch;
+        const responseHeaders = new Headers(search ? {
+          "x-gateway-target-provider": providerRuntimeId(search.provider)
+        } : {});
         try {
-          const result = await executeClaudeCodeWebSearchSideQuery(webSearch, upstreamAbortController.signal);
+          const result = kimiSearch
+            ? await executeKimiClientSearchRequest(kimiSearch, upstreamAbortController.signal)
+            : await executeClaudeCodeWebSearchSideQuery(webSearch!, upstreamAbortController.signal);
           for (const [name, value] of Object.entries(result.headers)) {
             responseHeaders.set(name, value);
           }
           routeTrace?.capture({
             durationMs: Date.now() - searchStartedAt,
             kind: "decision",
-            name: webSearch.backend === "kimi" ? "enrichment.kimi-search" : "enrichment.bailian-enhanced-search",
+            name: kimiSearch ? "enrichment.kimi-client-search"
+              : search?.backend === "kimi" ? "enrichment.kimi-search" : "enrichment.bailian-enhanced-search",
             phase: "enrichment",
             startedAtMs: searchStartedAt,
-            target: { model: effectiveModel, provider: webSearch.provider.name }
+            target: { model: effectiveModel, provider: search?.provider.name }
           });
           if (clientDisconnected || response.destroyed) {
             writeRequestLog(clientClosedRequestStatusCode, responseHeaders, "", false, clientDisconnectMessage);

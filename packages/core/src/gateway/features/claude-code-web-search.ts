@@ -1,30 +1,18 @@
-import { createHash, randomUUID } from "node:crypto";
-import type { AppConfig, GatewayProviderConfig, ProfileConfig, ProviderCredentialConfig } from "@ccr/core/contracts/app";
+import { randomUUID } from "node:crypto";
+import type { AppConfig, ProfileConfig } from "@ccr/core/contracts/app";
 import { parseJsonObjectSafe, serializeJsonBodyWithModel } from "@ccr/core/gateway/http/body";
 import { isRecord, stringValue } from "@ccr/core/gateway/internal/value";
 import type { BrowserWebSearchProtocolResult } from "@ccr/core/gateway/internal/shared";
-import { bailianEnhancedSearchHttpStatus, normalizeBailianEnhancedSearchQuery, searchBailianEnhancedWeb } from "@ccr/core/gateway/features/bailian-enhanced-search/mcp";
-import { modelRegistryForConfig, normalizeRouteSelector, providerRuntimeId } from "@ccr/core/routing/model-registry";
-import { activeProviderCredentials, providerCredentialApiKey, providerCredentialRuntimeId } from "@ccr/core/providers/runtime-topology";
-import { reserveProviderCredentialUsage } from "@ccr/core/providers/credential-pool";
-import { selectProviderCredentials } from "@ccr/core/gateway/upstream/executor";
-import { kimiSearchHttpStatus, kimiSearchTarget, searchKimiWeb } from "@ccr/core/gateway/features/kimi-search";
+import { normalizeBailianEnhancedSearchQuery } from "@ccr/core/gateway/features/bailian-enhanced-search/mcp";
+import { boundWebSearchResults, executeProviderWebSearch, providerWebSearchBackend, resolveProviderWebSearchModel, type ProviderWebSearchContext } from "@ccr/core/gateway/features/provider-web-search";
+import { normalizeRouteSelector } from "@ccr/core/routing/model-registry";
 
-const sideQueryTimeoutMs = 15_000;
-const maxResults = 8;
 const maxDomainFilters = 64;
 const maxDomainFilterLength = 2_048;
 const claudeCodeWebSearchQueryPrefix = /^perform\s+a\s+web\s+search\s+for\s+the\s+query:\s*/i;
-const searchCredentialCooldownMs = 60_000;
-const maxSearchCredentialCooldowns = 1_024;
-const searchCredentialCooldowns = new Map<string, number>();
 
 type DomainFilter = { hostname: string; path?: string[] };
-export type ClaudeCodeWebSearchSideQueryContext = {
-  backend: "bailian" | "kimi";
-  config: Pick<AppConfig, "providerPlugins">;
-  provider: GatewayProviderConfig;
-  query: string;
+export type ClaudeCodeWebSearchSideQueryContext = ProviderWebSearchContext & {
   model: string;
   stream: boolean;
   allowedDomains?: DomainFilter[];
@@ -69,11 +57,11 @@ export function prepareClaudeCodeWebSearchSideQuery(input: {
   if (input.method.toUpperCase() !== "POST" || !/^\/v1\/messages\/?$/.test(input.path) || !input.body) {
     return undefined;
   }
-  if (!input.config.Providers.some((provider) => searchBackend(provider))) {
+  if (!input.config.Providers.some((provider) => providerWebSearchBackend(provider))) {
     return undefined;
   }
-  const routed = input.routedModel === undefined ? undefined : modelRegistryForConfig(input.config).resolve(input.routedModel);
-  if (input.routedModel !== undefined && (routed?.kind !== "provider" || !searchBackend(routed.provider))) {
+  const routed = input.routedModel === undefined ? undefined : resolveProviderWebSearchModel(input.config, input.routedModel);
+  if (input.routedModel !== undefined && (!routed || !providerWebSearchBackend(routed.provider))) {
     return undefined;
   }
   let body: unknown;
@@ -85,9 +73,9 @@ export function prepareClaudeCodeWebSearchSideQuery(input: {
   if (!isRecord(body) || !isClaudeCodeWebSearchSideQueryBody(body)) {
     return undefined;
   }
-  const resolved = routed ?? modelRegistryForConfig(input.config).resolve(stringValue(body.model));
-  const backend = resolved?.kind === "provider" ? searchBackend(resolved.provider) : undefined;
-  if (resolved?.kind !== "provider" || !backend) {
+  const resolved = routed ?? resolveProviderWebSearchModel(input.config, stringValue(body.model));
+  const backend = resolved ? providerWebSearchBackend(resolved.provider) : undefined;
+  if (!resolved || !backend) {
     return undefined;
   }
   const text = stripClaudeCodeWebSearchQueryPrefix(sideQueryUserText(body));
@@ -128,42 +116,9 @@ export async function executeClaudeCodeWebSearchSideQuery(
   if (context.validationError) {
     return sideQueryError(400, "invalid_request_error", context.validationError);
   }
-  const label = context.backend === "kimi" ? "Kimi web search" : "Bailian enhanced web search";
-  const credential = searchCredential(context.provider, context.backend);
-  if (!credential) {
-    return sideQueryError(503, "api_error", `${label} has no available API key.`);
-  }
-  let results: BrowserWebSearchProtocolResult[];
-  try {
-    results = (context.backend === "kimi"
-      ? await searchKimiWeb({ config: context.config, provider: context.provider, apiKey: credential.apiKey,
-        credentialName: credential.internalName, query: context.query, signal, timeoutMs: sideQueryTimeoutMs })
-      : await searchBailianEnhancedWeb({ apiKey: credential.apiKey, query: context.query, signal, timeoutMs: sideQueryTimeoutMs }))
-      .filter((result) => resultMatchesDomains(result, context))
-      .slice(0, maxResults)
-      .map((result) => ({
-        title: result.title.slice(0, 500),
-        url: result.url.slice(0, 2_000),
-        ...(result.snippet ? { snippet: result.snippet.slice(0, 4_000) } : {})
-      }));
-  } catch (error) {
-    signal?.throwIfAborted();
-    if (error instanceof Error && error.name === "AbortError") {
-      throw error;
-    }
-    const status = context.backend === "kimi" ? kimiSearchHttpStatus(error) : bailianEnhancedSearchHttpStatus(error);
-    if (credential.cooldownKey && (status === 401 || status === 403 || status === 429)) {
-      // Search refusals must not mark the normal model credential unhealthy.
-      if (searchCredentialCooldowns.size >= maxSearchCredentialCooldowns) {
-        const oldest = searchCredentialCooldowns.keys().next().value;
-        if (oldest) searchCredentialCooldowns.delete(oldest);
-      }
-      searchCredentialCooldowns.set(credential.cooldownKey, Date.now() + searchCredentialCooldownMs);
-    }
-    return error instanceof Error && error.name === "TimeoutError"
-      ? sideQueryError(504, "api_error", `${label} timed out.`)
-      : sideQueryError(502, "api_error", `${label} failed.`);
-  }
+  const outcome = await executeProviderWebSearch(context, signal);
+  if (outcome.kind === "error") return sideQueryError(outcome.statusCode, "api_error", outcome.message);
+  const results = boundWebSearchResults(outcome.results.filter((result) => resultMatchesDomains(result, context)));
   signal?.throwIfAborted();
   const message = buildSideQueryMessage(context.model, context.query, results);
   return {
@@ -217,46 +172,6 @@ function sideQueryUserText(body: Record<string, unknown>): string | undefined {
 
 export function stripClaudeCodeWebSearchQueryPrefix(query: string | undefined): string | undefined {
   return query?.trimStart().replace(claudeCodeWebSearchQueryPrefix, "");
-}
-
-function searchBackend(provider: GatewayProviderConfig): ClaudeCodeWebSearchSideQueryContext["backend"] | undefined {
-  if (provider.enabled === false) return undefined;
-  if (kimiSearchTarget(provider)) return "kimi";
-  return provider.enhancedSearch?.enabled === true ? "bailian" : undefined;
-}
-
-function searchCredential(provider: GatewayProviderConfig, backend: ClaudeCodeWebSearchSideQueryContext["backend"]): {
-  apiKey: string; cooldownKey?: string; internalName?: string;
-} | undefined {
-  const dedicated = backend === "bailian" ? provider.enhancedSearch?.apiKey?.trim() : undefined;
-  if (dedicated) {
-    return { apiKey: dedicated };
-  }
-  if (provider.credentials?.length) {
-    for (const [key, until] of searchCredentialCooldowns) {
-      if (until <= Date.now()) searchCredentialCooldowns.delete(key);
-    }
-    const credentials = activeProviderCredentials(provider).filter((credential) =>
-      !searchCredentialCooldowns.has(searchCredentialCooldownKey(provider, credential))
-    );
-    const usage = { totalTokens: 0, imageCount: 0 };
-    const protocol = backend === "kimi" ? kimiSearchTarget(provider)?.protocol : "anthropic_messages";
-    if (!protocol) return undefined;
-    const selected = selectProviderCredentials(provider, protocol, credentials, usage);
-    const credential = selected.credentials[0]?.credential;
-    return !selected.saturated && credential && reserveProviderCredentialUsage(provider, credential, usage)
-      ? { apiKey: providerCredentialApiKey(credential), cooldownKey: searchCredentialCooldownKey(provider, credential),
-        internalName: selected.credentials[0].internalName }
-      : undefined;
-  }
-  const apiKey = provider.apikey?.trim() || provider.apiKey?.trim() || provider.api_key?.trim();
-  return apiKey ? { apiKey } : undefined;
-}
-
-function searchCredentialCooldownKey(provider: GatewayProviderConfig, credential: ProviderCredentialConfig): string {
-  return createHash("sha256")
-    .update(JSON.stringify([providerRuntimeId(provider), providerCredentialRuntimeId(provider, credential), providerCredentialApiKey(credential)]))
-    .digest("hex");
 }
 
 function parseDomainFilters(value: unknown): DomainFilter[] | undefined {

@@ -40,6 +40,20 @@ test("only an enabled official Kimi upstream retains the CCR search pipeline", (
   assert.equal(needsSearchPipeline(), false, "a Kimi name or model on another upstream must not change runtime selection");
 });
 
+test("active Kimi profiles retain the client search endpoint even with an unsupported default provider", () => {
+  const config = createDefaultAppConfig();
+  config.Providers = [];
+  const profile = { id: "kimi", agent: "kimi", enabled: true, model: "Other/model" };
+  config.profile.profiles = [profile];
+  const needsSearchPipeline = () => singleGatewayRuntimeBlockersForTest(config, pluginCapableOptions()).includes("kimi-client-search");
+  assert.equal(needsSearchPipeline(), true);
+  profile.enabled = false;
+  assert.equal(needsSearchPipeline(), false);
+  profile.enabled = true;
+  config.profile.enabled = false;
+  assert.equal(needsSearchPipeline(), false);
+});
+
 test("single gateway runtime falls back when browser automation MCP needs Electron routing", () => {
   const config = createDefaultAppConfig();
   config.toolHub.enabled = true;
