@@ -2386,7 +2386,7 @@ export const appCopy: Record<ResolvedLanguage, AppCopy> = {
       "US (Virginia)": "美国（弗吉尼亚）",
       "Hong Kong (China)": "中国香港",
       "Enhanced web search": "增强搜索",
-      "Handle Claude Code dedicated WebSearch queries routed to this provider with Bailian enhanced search. Leave the API key empty to use an available provider API key.": "通过百炼增强搜索处理路由到此供应商的 Claude Code 专用 WebSearch 请求。API Key 留空则使用供应商中可用的 API Key。",
+      "Handle Claude Code and Kimi searches with Bailian enhanced search when this provider is selected by the profile default model. Leave the API key empty to use an available provider API key.": "当 Profile 默认模型使用此供应商时，通过百炼增强搜索处理 Claude Code 和 Kimi 的搜索请求。API Key 留空则使用供应商中可用的 API Key。",
       "Enhanced search API key": "增强搜索 API Key",
       "Leave empty to use the provider API key": "留空则使用供应商 API Key",
       "providers": "供应商",
