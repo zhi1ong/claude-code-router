@@ -24,7 +24,7 @@ before(async () => {
   requestLogRuntime.options.workerFile = path.resolve(__dirname, "../../../runtime/request-log-worker.js");
 });
 
-test("Kimi client search follows the authenticated default through the real HTTP pipeline", { timeout: 30000 }, async (t) => {
+test("Kimi and DSH client search follow the authenticated default through the real HTTP pipeline", { timeout: 30000 }, async (t) => {
   const modelCalls = [];
   const bailianCalls = [];
   const kimiCalls = [];
@@ -172,6 +172,26 @@ test("Kimi client search follows the authenticated default through the real HTTP
   assert.equal((await post("/v1/search", query, "key-limited")).status, 429);
   assert.equal(bailianCalls.length, 9, "the rate-limited request cannot reach EnhancedSearch");
 
+  const dshQuery = { query: "Shanghai weather", count: 10, need_content: false, ori_question: "Shanghai weather?" };
+  const dsh = await post("/v1/tools/search", dshQuery, "key-bailian");
+  assert.equal(dsh.status, 200, dsh.text);
+  assert.deepEqual(JSON.parse(dsh.text), { results: [
+    { url: "https://example.test/bailian", title: "Bailian", snippet: "Bailian evidence", date: null }
+  ] });
+  assert.equal(bailianCalls.length, 12);
+  assert.equal(bailianCalls.at(-1).authorization, "Bearer search-Selected");
+  assert.equal(bailianCalls.at(-1).body.params.arguments.query, dshQuery.query);
+  const dshClaudeProfile = await post("/tools/search", dshQuery, "key-cc");
+  assert.equal(dshClaudeProfile.status, 200, dshClaudeProfile.text);
+  assert.match(dshClaudeProfile.text, /Kimi evidence/);
+  assert.equal(kimiCalls.length, 2);
+  for (const [key, expected] of [["invalid-key", 401], ["general-key", 503], ["key-unsupported", 503]]) {
+    assert.equal((await post("/v1/tools/search", dshQuery, key)).status, expected);
+  }
+  assert.equal((await post("/v1/tools/search", { text_query: "Shanghai weather" })).status, 400);
+  assert.equal(bailianCalls.length, 12);
+  assert.equal(kimiCalls.length, 2);
+
   const controller = new AbortController();
   const pending = post("/v1/search", { text_query: "hang" }, "key-official", { signal: controller.signal });
   await hangingStarted.promise;
@@ -205,6 +225,7 @@ test("Kimi client search follows the authenticated default through the real HTTP
   assert.equal(status.state, "running", status.lastError);
   assert.notEqual(status.endpoint, status.coreEndpoint, "an unsupported default is rejected through the CCR pipeline");
   assert.equal((await post("/v1/search", query, "key-unsupported")).status, 503);
+  assert.equal((await post("/v1/tools/search", { query: "Shanghai weather" }, "key-unsupported")).status, 503);
   assert.equal(modelCalls.length, 0, "unsupported defaults never forward /search to an arbitrary model endpoint");
 });
 

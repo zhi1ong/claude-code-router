@@ -28,6 +28,7 @@ import {
 import { isCodexResponsesCompactPath, type ContextArchiveResponseMode } from "@ccr/core/gateway/context-archive/protocol";
 import { adaptRouteRequestBody, restoreRouteRequestBody } from "@ccr/core/routing/protocol-adapter";
 import { executeClaudeCodeWebSearchSideQuery, prepareClaudeCodeWebSearchProfileRequest, prepareClaudeCodeWebSearchSideQuery } from "@ccr/core/gateway/features/claude-code-web-search";
+import { executeDshSearchRequest, prepareDshSearchRequest } from "@ccr/core/gateway/features/dsh-search";
 import { executeKimiClientSearchRequest, prepareKimiClientSearchRequest } from "@ccr/core/gateway/features/kimi-client-search";
 import { reserveApiKeyLimits } from "@ccr/core/gateway/auth/api-key-authorizer";
 import { recordProviderCredentialOutcome } from "@ccr/core/providers/credential-pool";
@@ -439,14 +440,18 @@ export class GatewayRequestPipeline {
       const kimiSearch = prepareKimiClientSearchRequest({
         config: activeConfig, method, path, body: bodyToForward, profile: authenticatedProfile
       });
-      if (kimiSearch?.model) {
-        routedModel = effectiveModel = kimiSearch.model;
+      const dshSearch = kimiSearch ? undefined : prepareDshSearchRequest({
+        config: activeConfig, method, path, body: bodyToForward, profile: authenticatedProfile
+      });
+      const clientSearch = kimiSearch ?? dshSearch;
+      if (clientSearch?.model) {
+        routedModel = effectiveModel = clientSearch.model;
         headers[ccrRoutedModelHeader] = sanitizeHeaderValue(routedModel);
         routeTrace?.capture({
           kind: "decision",
-          name: "kimi-client.web-search-default-model",
+          name: dshSearch ? "dsh.web-search-default-model" : "kimi-client.web-search-default-model",
           phase: "routing",
-          target: { model: routedModel, provider: kimiSearch.search?.provider.name }
+          target: { model: routedModel, provider: clientSearch.search?.provider.name }
         });
       }
       const deniedModel = profileDeniedModel(activeConfig, authenticatedProfile, modelBeforeRouting, effectiveModel) ??
@@ -491,14 +496,16 @@ export class GatewayRequestPipeline {
         requestedModel,
         routedModel: effectiveModel
       });
-      if (webSearch || kimiSearch) {
+      if (webSearch || clientSearch) {
         const searchStartedAt = Date.now();
-        const search = kimiSearch?.search ?? webSearch;
+        const search = clientSearch?.search ?? webSearch;
         const responseHeaders = new Headers(search ? {
           "x-gateway-target-provider": providerRuntimeId(search.provider)
         } : {});
         try {
-          const result = kimiSearch
+          const result = dshSearch
+            ? await executeDshSearchRequest(dshSearch, upstreamAbortController.signal)
+            : kimiSearch
             ? await executeKimiClientSearchRequest(kimiSearch, upstreamAbortController.signal)
             : await executeClaudeCodeWebSearchSideQuery(webSearch!, upstreamAbortController.signal);
           for (const [name, value] of Object.entries(result.headers)) {
@@ -507,7 +514,7 @@ export class GatewayRequestPipeline {
           routeTrace?.capture({
             durationMs: Date.now() - searchStartedAt,
             kind: "decision",
-            name: kimiSearch ? "enrichment.kimi-client-search"
+            name: dshSearch ? "enrichment.dsh-search" : kimiSearch ? "enrichment.kimi-client-search"
               : search?.backend === "kimi" ? "enrichment.kimi-search" : "enrichment.bailian-enhanced-search",
             phase: "enrichment",
             startedAtMs: searchStartedAt,
