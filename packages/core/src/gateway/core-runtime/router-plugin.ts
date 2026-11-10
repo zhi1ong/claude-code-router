@@ -296,6 +296,7 @@ export async function createGatewayPlugin(input: GatewayPluginFactoryInput = {})
           "POST /v1/messages",
           "POST /v1/messages/count_tokens",
           "POST /v1/search",
+          "POST /v1/tools/search",
           "GET /models",
           "GET /v1/models"
         ],
